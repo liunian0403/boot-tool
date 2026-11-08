@@ -1,6 +1,7 @@
 name: release
 
-# 打 v* 标签即自动构建 Windows 产物并发布 GitHub Release
+# 打 v* 标签即自动构建 Windows 三资产（exe / 诊断版 / setup.exe）并发布
+# GitHub Release（docs/design.md §6.2，ADR-2：单 windows-latest job）。
 on:
   push:
     tags:
@@ -11,7 +12,7 @@ permissions:
 
 jobs:
   release:
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -20,24 +21,61 @@ jobs:
           go-version-file: go.mod
 
       - name: Test
+        shell: bash
         run: |
           go vet ./...
           go test ./...
           GOOS=windows go vet ./...
 
       - name: Build
+        shell: bash
         run: |
+          VER="${GITHUB_REF_NAME#v}"
+          # 版本号同时注入 Go（main.version）与 Inno（AppVersion），必须是 x.y.z：
+          # VersionInfoVersion 由 AppVersion 推导，非数字会编译失败（ADR-3）。
+          if ! [[ "$VER" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "tag ${GITHUB_REF_NAME} is not vX.Y.Z" >&2
+            exit 1
+          fi
           mkdir -p dist
-          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
-            go build -trimpath -ldflags "-s -w -H=windowsgui" -o dist/boot-tool.exe ./cmd/boot-tool
-          (cd dist && sha256sum boot-tool.exe > SHA256SUMS.txt)
-          cat dist/SHA256SUMS.txt
+          go build -trimpath -ldflags "-s -w -H=windowsgui -X main.version=${VER}" -o dist/boot-tool.exe ./cmd/boot-tool
+          go build -trimpath -ldflags "-s -w -X main.version=${VER}" -o dist/boot-tool-debug.exe ./cmd/boot-tool
+
+      # 与 ci.yml 保持一致：同版本、同 sha256。
+      - name: Install Inno Setup 7.1.1 (pinned)
+        shell: pwsh
+        run: |
+          $url = "https://github.com/jrsoftware/issrc/releases/download/is-7_1_1/innosetup-7.1.1-x64.exe"
+          $sha = "8a5a6711c3766a6e5fb74f280ba0e3551e719ce94538d901fdbd1f8f9920b3f0"
+          $setup = Join-Path $env:RUNNER_TEMP "innosetup-7.1.1-x64.exe"
+          Invoke-WebRequest -Uri $url -OutFile $setup
+          $got = (Get-FileHash -Algorithm SHA256 -Path $setup).Hash.ToLower()
+          if ($got -ne $sha) { throw "Inno Setup installer sha256 mismatch: $got" }
+          $dir = "C:\innosetup"
+          Start-Process -FilePath $setup -ArgumentList "/VERYSILENT","/NORESTART","/SUPPRESSMSGBOXES","/DIR=$dir" -Wait | Out-Null
+          if (-not (Test-Path "$dir\ISCC.exe")) { throw "ISCC.exe not found in $dir" }
+
+      - name: Build setup.exe
+        shell: pwsh
+        run: |
+          $ver = $env:GITHUB_REF_NAME -replace '^v', ''
+          & "C:\innosetup\ISCC.exe" "/DMyAppVersion=$ver" "packaging\boot-tool.iss"
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
+          if (-not (Test-Path "dist\setup.exe")) { throw "dist\setup.exe was not produced" }
+
+      - name: Checksums
+        shell: bash
+        working-directory: dist
+        run: |
+          sha256sum boot-tool.exe boot-tool-debug.exe setup.exe > SHA256SUMS.txt
+          cat SHA256SUMS.txt
 
       - name: Create release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
         run: |
           gh release create "${GITHUB_REF_NAME}" \
-            dist/boot-tool.exe dist/SHA256SUMS.txt \
+            dist/boot-tool.exe dist/boot-tool-debug.exe dist/setup.exe dist/SHA256SUMS.txt \
             --title "boot-tool ${GITHUB_REF_NAME}" \
             --generate-notes
