@@ -27,6 +27,16 @@ type Fake struct {
 	at time.Time
 }
 
+// SourceName reports the platform time source for diagnostics (the startup log
+// records it so a field report can be tied to the API that answered). Clocks
+// that do not name themselves report "unknown"; it never affects readings.
+func SourceName(c Clock) string {
+	if s, ok := c.(interface{ Source() string }); ok {
+		return s.Source()
+	}
+	return "unknown"
+}
+
 // NewFake returns a Fake at wall time `at` with uptime `up`.
 func NewFake(at time.Time, up time.Duration) *Fake {
 	return &Fake{at: at, up: up}

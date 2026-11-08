@@ -22,6 +22,9 @@ type procClock struct{}
 // Now returns the wall clock.
 func (procClock) Now() time.Time { return time.Now() }
 
+// Source names the dev-mode time source for the startup log.
+func (procClock) Source() string { return "/proc/uptime" }
+
 // Uptime parses the first field of /proc/uptime, seconds since boot.
 func (procClock) Uptime() time.Duration {
 	b, err := os.ReadFile("/proc/uptime")
