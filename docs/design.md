@@ -317,7 +317,7 @@ func Fatal(r any)                      // panic 兜底
 |---|---|---|---|
 | F6/AC0 失败可见性 | `internal/diag/`（diag.go / diag_windows.go / diag_proc.go + 2 个测试文件）、`cmd/boot-tool/main.go`、`internal/gui/*` | `go test ./...`、双平台 `go vet`、交叉编译 ✅ | stage 失败 = 日志 `stage: <name> FAILED: <err>` + 中英双语对话框（含日志路径）+ 退出码 1 |
 | 日志 512KB 轮转 | `internal/diag/diag.go` | 单测 `TestLogRotatesAtCap` ✅ | 超限滚动到 `boot-tool.log.1`（覆盖旧副本） |
-| diag 不 panic 单测 | `internal/diag/diag_test.go`、`diag_alert_test.go` | 6 个用例 ✅ | Windows 侧对话框用例以 `//go:build !windows` 隔离，避免阻塞 `release.yml` 的 Windows 测试；真机行为归 B0 |
+| diag 不 panic 单测 | `internal/diag/diag_test.go`、`diag_alert_test.go` | 8 个用例 ✅ | Windows 侧对话框用例以 `//go:build !windows` 隔离，避免阻塞 `release.yml` 的 Windows 测试；真机行为归 B0 |
 | 安装包 | `packaging/boot-tool.iss`（UTF-8 **带 BOM**） | 仅静态审查 | **本机为 Linux，无法运行 ISCC —— `setup.exe` 编译属 CI 验证项**（`ci.yml` installer job） |
 | CI | `.github/workflows/ci.yml` | YAML 静态审查 | ubuntu：vet/test/交叉编译；windows：Inno 静默安装 + ISCC 出包 |
 | 发布 | `.github/workflows/release.yml` | YAML 静态审查 | 单 `windows-latest` job：测试 → 双 exe → setup.exe → 三资产 SHA256 → `gh release create`；**首次跑通依赖 `started_5` 打 tag** |
