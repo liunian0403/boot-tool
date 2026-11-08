@@ -1,6 +1,6 @@
-name: release
+﻿name: release
 
-# 打 v* 标签即自动构建 Windows 三资产（exe / 诊断版 / setup.exe）并发布
+# 打 v* 标签即自动构建 Windows 三资产（exe / 诊断版 / boot-tool-setup.exe）并发布
 # GitHub Release（docs/design.md §6.2，ADR-2：单 windows-latest job）。
 on:
   push:
@@ -55,19 +55,19 @@ jobs:
           Start-Process -FilePath $setup -ArgumentList "/VERYSILENT","/NORESTART","/SUPPRESSMSGBOXES","/DIR=$dir" -Wait | Out-Null
           if (-not (Test-Path "$dir\ISCC.exe")) { throw "ISCC.exe not found in $dir" }
 
-      - name: Build setup.exe
+      - name: Build boot-tool-setup.exe
         shell: pwsh
         run: |
           $ver = $env:GITHUB_REF_NAME -replace '^v', ''
           & "C:\innosetup\ISCC.exe" "/DMyAppVersion=$ver" "packaging\boot-tool.iss"
           if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
-          if (-not (Test-Path "dist\setup.exe")) { throw "dist\setup.exe was not produced" }
+          if (-not (Test-Path "dist\boot-tool-setup.exe")) { throw "dist\boot-tool-setup.exe was not produced" }
 
       - name: Checksums
         shell: bash
         working-directory: dist
         run: |
-          sha256sum boot-tool.exe boot-tool-debug.exe setup.exe > SHA256SUMS.txt
+          sha256sum boot-tool.exe boot-tool-debug.exe boot-tool-setup.exe > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
       - name: Create release
@@ -76,6 +76,6 @@ jobs:
         shell: bash
         run: |
           gh release create "${GITHUB_REF_NAME}" \
-            dist/boot-tool.exe dist/boot-tool-debug.exe dist/setup.exe dist/SHA256SUMS.txt \
+            dist/boot-tool.exe dist/boot-tool-debug.exe dist/boot-tool-setup.exe dist/SHA256SUMS.txt \
             --title "boot-tool ${GITHUB_REF_NAME}" \
             --generate-notes

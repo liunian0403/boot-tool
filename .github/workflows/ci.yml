@@ -1,4 +1,4 @@
-name: ci
+﻿name: ci
 
 # PR / main 推送门禁：vet + 双平台检查 + 交叉编译 + 安装包编译，
 # 避免坏提交拖到打 tag 发布时才暴露（docs/design.md §6.1、§13）。
@@ -63,11 +63,11 @@ jobs:
           Start-Process -FilePath $setup -ArgumentList "/VERYSILENT","/NORESTART","/SUPPRESSMSGBOXES","/DIR=$dir" -Wait | Out-Null
           if (-not (Test-Path "$dir\ISCC.exe")) { throw "ISCC.exe not found in $dir" }
 
-      - name: Compile setup.exe
+      - name: Compile boot-tool-setup.exe
         shell: pwsh
         run: |
           # 0.0.0 只是让脚本可编译的占位版本；发布版本由 release.yml 从 tag 传入
           & "C:\innosetup\ISCC.exe" "/DMyAppVersion=0.0.0" "packaging\boot-tool.iss"
           if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
-          if (-not (Test-Path "dist\setup.exe")) { throw "dist\setup.exe was not produced" }
-          Get-Item "dist\setup.exe" | Format-List Name, Length
+          if (-not (Test-Path "dist\boot-tool-setup.exe")) { throw "dist\boot-tool-setup.exe was not produced" }
+          Get-Item "dist\boot-tool-setup.exe" | Format-List Name, Length

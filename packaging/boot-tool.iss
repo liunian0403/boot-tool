@@ -2,14 +2,14 @@
 ; 契约见 docs/design.md §4.1（ADR-1）：按用户安装到 %LOCALAPPDATA%、免管理员（PrivilegesRequired=lowest）。
 ;
 ; 本地/CI 编译：
-;   ISCC.exe /DMyAppVersion=0.2.0 packaging\boot-tool.iss     ; 版本由 CI 从 v* tag 传入
-; 产物：..\dist\setup.exe（与 boot-tool.exe 同一构建产物，见 docs/design.md §4.3）
+;   ISCC.exe /DMyAppVersion=0.3.0 packaging\boot-tool.iss     ; 版本由 CI 从 v* tag 传入
+; 产物：..\dist\boot-tool-setup.exe（与 boot-tool.exe 同一构建产物，见 docs/design.md §4.3）
 ;
 ; 本文件必须保存为 UTF-8 with BOM：ISCC 只靠 BOM 识别 UTF-8，
 ; 否则中文在非中文系统（CI runner）上会按 ANSI 解析导致乱码或编译失败。
 
 #ifndef MyAppVersion
-  #define MyAppVersion "0.2.0"
+  #define MyAppVersion "0.3.0"
 #endif
 
 [Setup]
@@ -21,7 +21,7 @@ AppPublisher=boot-tool
 DefaultDirName={localappdata}\Programs\BootTool
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
-OutputBaseFilename=setup
+OutputBaseFilename=boot-tool-setup
 OutputDir=..\dist
 Compression=lzma2
 SolidCompression=yes
@@ -40,6 +40,13 @@ Name: "chinesesimplified"; MessagesFile: "compiler:Languages\ChineseSimplified.i
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
+; 开机自动启动（PRD F7）：默认勾选，首次安装即生效；已安装过则保留用户上次的选择
+Name: "startup"; Description: "开机时自动启动，右下角显示本次开机用时 / Start at sign-in and show boot duration"; GroupDescription: "启动选项 / Startup"; Flags: checkedonce
+
+[Registry]
+; 开机自启：HKCU\...\Run（免管理员），命令带 --autostart 走右下角弹窗模式（PRD F7/F8，docs/design.md §15.2）
+; 卸载时删除该值；用户取消勾选则本条目不会写入
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "BootTool"; ValueData: """{app}\boot-tool.exe"" --autostart"; Flags: uninsdeletevalue; Tasks: startup
 
 [Files]
 Source: "..\dist\boot-tool.exe"; DestDir: "{app}"; Flags: ignoreversion

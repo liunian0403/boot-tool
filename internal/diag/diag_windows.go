@@ -16,17 +16,30 @@ var user32MessageBox = syscall.NewLazyDLL("user32.dll").NewProc("MessageBoxW")
 // (possibly never created) main window.
 func Alert(msg string) {
 	const ( // MB_OK | MB_ICONERROR | MB_SYSTEMMODAL
-		mbOk          = 0x0
 		mbIconError   = 0x10
 		mbSystemModal = 0x1000
 	)
+	show(msg, mbIconError|mbSystemModal)
+}
+
+// Info shows a modal informational dialog, used by the command-line actions
+// (--install-startup / --uninstall-startup / --help), which run without a window.
+func Info(msg string) {
+	const ( // MB_OK | MB_ICONINFORMATION | MB_SYSTEMMODAL
+		mbIconInfo    = 0x40
+		mbSystemModal = 0x1000
+	)
+	show(msg, mbIconInfo|mbSystemModal)
+}
+
+func show(msg string, flags uintptr) {
 	title := utf16("开机小助手 / Boot Tool")
 	body := utf16(msg)
 	_, _, _ = user32MessageBox.Call(
 		0,
 		uintptr(unsafe.Pointer(body)),
 		uintptr(unsafe.Pointer(title)),
-		mbOk|mbIconError|mbSystemModal,
+		flags,
 	)
 }
 

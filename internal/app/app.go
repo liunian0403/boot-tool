@@ -38,6 +38,41 @@ func (a *App) View() View {
 	}
 }
 
+// Toast is the one-shot bottom-right popup shown after an automatic start
+// (docs/PRD.md F8): the headline is the boot duration, so the user sees "how
+// long this boot took" without opening anything.
+type Toast struct {
+	Header   string // "本次开机用时"
+	Duration string // "3小时5分" — the headline value
+	Boot     string // "开机时间：2026-11-08 11:13:50"
+	Hint     string // "点击查看详情"
+}
+
+// ToastView reads a fresh snapshot for the startup popup.
+func (a *App) ToastView() Toast {
+	s := uptime.Read(a.clk)
+	return Toast{
+		Header:   a.toastHeader(),
+		Duration: tfmt.Uptime(s.Up, a.lang),
+		Boot:     a.labelBoot() + tfmt.Boot(s.Boot),
+		Hint:     a.toastHint(),
+	}
+}
+
+func (a *App) toastHeader() string {
+	if a.lang == locale.LangZh {
+		return "本次开机用时"
+	}
+	return "Boot duration"
+}
+
+func (a *App) toastHint() string {
+	if a.lang == locale.LangZh {
+		return "点击查看详情"
+	}
+	return "Click for details"
+}
+
 func (a *App) title() string {
 	if a.lang == locale.LangZh {
 		return "开机小助手"
