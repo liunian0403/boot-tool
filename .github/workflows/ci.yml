@@ -4,7 +4,7 @@ name: ci
 # 避免坏提交拖到打 tag 发布时才暴露（docs/design.md §6.1、§13）。
 on:
   push:
-    branches: [ main ]
+    branches: [ main, 'feature/**' ]
   pull_request:
 
 jobs:
