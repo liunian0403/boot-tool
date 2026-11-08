@@ -4,9 +4,11 @@ import (
 	"os"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/liunian0403/boot-tool/internal/app"
 	"github.com/liunian0403/boot-tool/internal/autostart"
+	"github.com/liunian0403/boot-tool/internal/bootlog"
 	"github.com/liunian0403/boot-tool/internal/clock"
 	"github.com/liunian0403/boot-tool/internal/diag"
 	"github.com/liunian0403/boot-tool/internal/gui"
@@ -16,7 +18,7 @@ import (
 // version is the release version; CI overwrites it from the v* tag with
 // -ldflags "-X main.version=..." so it never needs editing by hand
 // (docs/design.md §6.2, ADR-3).
-var version = "0.3.0"
+var version = "0.4.0"
 
 // startupAction is a maintenance command requested on the command line.
 type startupAction int
@@ -94,10 +96,29 @@ func run() int {
 	}
 	diag.Logf("stage: clock ok (source=%s)", clock.SourceName(clk))
 
+	// 本次开机耗时来自系统启动日志；读不到才回退为内核计时并在界面标注
+	// （快速启动会让内核计数跨关机连续累计，docs/design.md §16）。
+	boot, bootErr := bootlog.Read()
+	if bootErr != nil {
+		diag.Logf("stage: boot-record FAILED: %v (falling back to the kernel counter)", bootErr)
+		boot = bootlog.FromUptime(clk.Now(), clk.Uptime())
+	} else {
+		diag.Logf("stage: boot-record ok (kind=%s start=%s ready=%s duration=%s source=%s)",
+			boot.Kind,
+			boot.Start.Format(time.RFC3339),
+			boot.Ready.Format(time.RFC3339),
+			boot.Duration.Round(time.Millisecond),
+			boot.Source)
+		if boot.Cold != nil {
+			diag.Logf("stage: boot-record cold-reference duration=%s at=%s",
+				boot.Cold.Duration.Round(time.Millisecond), boot.Cold.At.Format(time.RFC3339))
+		}
+	}
+
 	lang := locale.Detect()
 	diag.Logf("stage: locale %s", lang)
 
-	if err := gui.Run(app.New(clk, lang), gui.Options{Mode: inv.mode}); err != nil {
+	if err := gui.Run(app.New(clk, lang, boot), gui.Options{Mode: inv.mode}); err != nil {
 		// gui.Run already reported the failing stage (log + dialog).
 		diag.Logf("boot-tool %s exiting after failure", version)
 		return 1

@@ -2,14 +2,14 @@
 ; 契约见 docs/design.md §4.1（ADR-1）：按用户安装到 %LOCALAPPDATA%、免管理员（PrivilegesRequired=lowest）。
 ;
 ; 本地/CI 编译：
-;   ISCC.exe /DMyAppVersion=0.3.0 packaging\boot-tool.iss     ; 版本由 CI 从 v* tag 传入
+;   ISCC.exe /DMyAppVersion=0.4.0 packaging\boot-tool.iss     ; 版本由 CI 从 v* tag 传入
 ; 产物：..\dist\boot-tool-setup.exe（与 boot-tool.exe 同一构建产物，见 docs/design.md §4.3）
 ;
 ; 本文件必须保存为 UTF-8 with BOM：ISCC 只靠 BOM 识别 UTF-8，
 ; 否则中文在非中文系统（CI runner）上会按 ANSI 解析导致乱码或编译失败。
 
 #ifndef MyAppVersion
-  #define MyAppVersion "0.3.0"
+  #define MyAppVersion "0.4.0"
 #endif
 
 [Setup]

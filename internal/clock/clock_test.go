@@ -7,11 +7,10 @@ import (
 	"time"
 
 	"github.com/liunian0403/boot-tool/internal/clock"
-	"github.com/liunian0403/boot-tool/internal/uptime"
 )
 
 // TestRealClockSanity: the dev-mode clock must return sane values on this
-// machine (boot instant in the past, uptime consistent with wall clock).
+// machine (a boot instant that lies in the past, consistent with the wall clock).
 func TestRealClockSanity(t *testing.T) {
 	c, err := clock.New()
 	if err != nil {
@@ -25,9 +24,8 @@ func TestRealClockSanity(t *testing.T) {
 	if d := time.Since(now); d < -5*time.Second || d > 5*time.Second {
 		t.Fatalf("Now() off from time.Now by %v", d)
 	}
-	s := uptime.Read(c)
-	if !s.Boot.Before(now) {
-		t.Fatalf("boot instant %v not before now %v", s.Boot, now)
+	if kernelStart := now.Add(-up); !kernelStart.Before(now) {
+		t.Fatalf("kernel start %v not before now %v", kernelStart, now)
 	}
 	// Cross-check against /proc/uptime is implicit: both use the same file;
 	// compare against kernel's own view within 2s.

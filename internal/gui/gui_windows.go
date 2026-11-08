@@ -86,7 +86,7 @@ const (
 	hwndTopmost   = ^uintptr(0) // (HWND)-1
 
 	windowW = 480
-	windowH = 200
+	windowH = 248
 
 	toastW      = 360
 	toastH      = 152
@@ -176,7 +176,8 @@ var (
 
 	hMain          uintptr // main window, created lazily
 	hUp            uintptr // uptime label (large)
-	hBoot          uintptr // boot-time label
+	hBootDur       uintptr // boot duration label
+	hBootDone      uintptr // boot-ready timestamp label
 	hHint          uintptr // small-print caliber note
 	mainClassOn    bool
 	mainClassTried bool
@@ -184,7 +185,7 @@ var (
 	hToast          uintptr // startup popup, created lazily
 	hToastHeader    uintptr
 	hToastDuration  uintptr
-	hToastBoot      uintptr
+	hToastDone      uintptr
 	hToastHint      uintptr
 	toastClassOn    bool
 	toastClassTried bool
@@ -288,13 +289,14 @@ func showMainWindow() error {
 	hMain = hwnd
 	diag.Logf("stage: window ok (hwnd=%d)", hwnd)
 
-	hUp = createStatic(hwnd, v.Up, 16, 18, 440, 48, 0)
-	hBoot = createStatic(hwnd, v.Boot, 16, 74, 440, 32, 0)
-	hHint = createStatic(hwnd, v.Hint, 16, 112, 440, 44, 0)
-	if hUp == 0 || hBoot == 0 || hHint == 0 {
+	hUp = createStatic(hwnd, v.Up, 16, 14, 448, 46, 0)
+	hBootDur = createStatic(hwnd, v.BootDur, 16, 64, 448, 32, 0)
+	hBootDone = createStatic(hwnd, v.BootDone, 16, 98, 448, 32, 0)
+	hHint = createStatic(hwnd, v.Hint, 16, 136, 448, 56, 0)
+	if hUp == 0 || hBootDur == 0 || hBootDone == 0 || hHint == 0 {
 		return diag.FailStage("controls", fmt.Errorf(
-			"CreateWindowExW(STATIC): hwnd up=%d boot=%d hint=%d, %w",
-			hUp, hBoot, hHint, syscall.GetLastError()))
+			"CreateWindowExW(STATIC): hwnd up=%d dur=%d done=%d hint=%d, %w",
+			hUp, hBootDur, hBootDone, hHint, syscall.GetLastError()))
 	}
 	diag.Logf("stage: controls ok")
 
@@ -302,7 +304,8 @@ func showMainWindow() error {
 		sendWMSetFont(hUp, fontLarge)
 	}
 	if fontNormal != 0 {
-		sendWMSetFont(hBoot, fontNormal)
+		sendWMSetFont(hBootDur, fontNormal)
+		sendWMSetFont(hBootDone, fontNormal)
 	}
 	if fontSmall != 0 {
 		sendWMSetFont(hHint, fontSmall)
@@ -445,7 +448,8 @@ func refresh() {
 	}
 	v := view.View()
 	setText(hUp, v.Up)
-	setText(hBoot, v.Boot)
+	setText(hBootDur, v.BootDur)
+	setText(hBootDone, v.BootDone)
 	setText(hHint, v.Hint)
 }
 

@@ -20,13 +20,14 @@ import (
 func Run(a *app.App, opt Options) error {
 	if opt.Mode == ModeToast {
 		t := a.ToastView()
-		fmt.Printf("[toast] %s: %s | %s | %s\n", t.Header, t.Duration, t.Boot, t.Hint)
+		fmt.Printf("[toast] %s: %s | %s | %s\n", t.Header, t.Duration, t.Done, t.Hint)
 		return nil
 	}
 
 	printView := func() {
 		v := a.View()
-		fmt.Printf("[%s] %s | %s\n", v.Title, v.Boot, v.Up)
+		fmt.Printf("[%s] %s | %s | %s\n", v.Title, v.Up, v.BootDur, v.BootDone)
+		fmt.Printf("        %s\n", v.Hint)
 	}
 
 	sig := make(chan os.Signal, 1)

@@ -41,12 +41,12 @@ func createToast(o Options) error {
 	t := view.ToastView()
 	hToastHeader = createStatic(hwnd, t.Header, 18, 12, toastW-36, 26, ssNotify)
 	hToastDuration = createStatic(hwnd, t.Duration, 16, 34, toastW-32, 44, ssNotify)
-	hToastBoot = createStatic(hwnd, t.Boot, 18, 84, toastW-36, 32, ssNotify)
+	hToastDone = createStatic(hwnd, t.Done, 18, 84, toastW-36, 32, ssNotify)
 	hToastHint = createStatic(hwnd, t.Hint, 18, 118, toastW-36, 26, ssNotify)
-	if hToastHeader == 0 || hToastDuration == 0 || hToastBoot == 0 || hToastHint == 0 {
+	if hToastHeader == 0 || hToastDuration == 0 || hToastDone == 0 || hToastHint == 0 {
 		return diag.FailStage("toast-controls", fmt.Errorf(
 			"CreateWindowExW(STATIC): header=%d duration=%d boot=%d hint=%d, %w",
-			hToastHeader, hToastDuration, hToastBoot, hToastHint, syscall.GetLastError()))
+			hToastHeader, hToastDuration, hToastDone, hToastHint, syscall.GetLastError()))
 	}
 	diag.Logf("stage: toast-controls ok")
 
@@ -55,7 +55,7 @@ func createToast(o Options) error {
 		sendWMSetFont(hToastHint, fontSmall)
 	}
 	if fontNormal != 0 {
-		sendWMSetFont(hToastBoot, fontNormal)
+		sendWMSetFont(hToastDone, fontNormal)
 	}
 	if fontToastLarge != 0 {
 		sendWMSetFont(hToastDuration, fontToastLarge)
@@ -115,7 +115,7 @@ func showToast() {
 	t := view.ToastView()
 	setText(hToastHeader, t.Header)
 	setText(hToastDuration, t.Duration)
-	setText(hToastBoot, t.Boot)
+	setText(hToastDone, t.Done)
 	setText(hToastHint, t.Hint)
 
 	positionToast(hToast)
