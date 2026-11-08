@@ -3,6 +3,7 @@
 > 依据 `docs/PRD.md`（v3，HYPE-46）。本文档是实现与测试的唯一技术基准。
 > v1 → v2：口径方案（§2）经上一轮验证**保持不变**；新增 §4（F5 双交付）、§5（F6/AC0 启动失败可见性）、§6（发布流水线重构）、§10（决策记录）、§11（分阶段实施计划）。
 > **v2 → v3（HYPE-46，2026-11-08）**：§2.1 时钟数据源改为**分层降级**（修复 kernel32 不再导出 `QueryInterruptTime` 导致的启动失败）；§5.1 stage 契约补 `single-instance` 与弹窗序列；新增 **§15**（F7 开机自启、F8 右下角弹窗、单实例激活、安装包产物更名）；§7/§8/§9/§10 同步。
+> **v3 → v4（HYPE-46，2026-11-08，用户反馈"刚开机显示一个多小时"）**：新增 **§16**——开机耗时/开机完成改为**读取系统事件日志打点**（`Kernel-Boot 27` / `Kernel-General 12` → `Winlogon 7001`），内核计数退居"读不到日志时的兜底"；原因是**快速启动（BootType=1）会让内核计数跨关机连续累计**，用它推导的"开机耗时"会凭空多出上一次会话的几小时。§5.1 stage 增 `boot-record`，§8/§9/§10 同步。
 
 ## 0. 结论先行
 
@@ -17,17 +18,20 @@
 | 7 | 开机自启（F7） | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 单值 `BootTool`，命令带 `--autostart`；由安装器写入，程序也提供 `--install-startup/--uninstall-startup`（§15.1） |
 | 8 | 启动弹窗（F8） | 无第三方 UI 库的原生 Win32 卡片：置顶工具窗口 + 不抢焦点 + 主屏工作区右下角 + 3s 延迟/10s 停留 + 点击进主窗口（§15.2） |
 | 9 | 安装包产物名 | `boot-tool-setup.exe`（Inno Setup 7 对 `setup.exe` 有兼容层 shim 警告，安全面更优，ADR-6） |
+| 10 | 开机耗时数据源（v4） | **系统事件日志打点**：`Kernel-Boot 27`/`Kernel-General 12`（启动）→ `Winlogon 7001`（登录完成）；内核计数不再作为界面数字（ADR-9） |
+| 11 | "已运行"起点（v4） | 自**登录完成**起算，用单调计数推进；不再等同任务管理器"正常运行时间"（ADR-10） |
+| 12 | 日志不可读（v4） | 显示"未知"+ 风险提示，内核计时仅作兜底并在界面标注（ADR-11） |
 
 
 ## 1. 现状盘点（`feature/HYPE-44` @ `edd7a7f`）
 
 ```
-cmd/boot-tool/main.go        入口：装配 clock / locale / gui（12 行）
+cmd/boot-tool/main.go        入口：装配 clock / bootlog / locale / gui
 internal/clock/              Clock 接口 + 平台实现（Windows QueryInterruptTime / Linux /proc/uptime）+ Fake
-internal/uptime/             核心口径：Snapshot{TakenAt, Up, Boot}，Boot = Now − Up 每次重算
+internal/bootlog/            v4 新增：本次开机耗时/完成时刻（读 System 事件日志打点，见 §16）
 internal/locale/             语言检测（GetUserDefaultUILanguage / LANG）
 internal/tfmt/               中英时长与时间格式化
-internal/app/                装配 View{Title, Up, Boot, Hint}
+internal/app/                装配 View{Title, Up, BootDur, BootDone, Hint}（v4）
 internal/gui/                Win32 原生窗口（user32 裸 syscall）；非 Windows 控制台模式
 docs/                        PRD、本设计、测试计划
 .github/workflows/release.yml 打 v* 标签 → ubuntu 构建 exe → GitHub Release
@@ -51,15 +55,18 @@ docs/                        PRD、本设计、测试计划
 
 **降级不改变口径**：三者同为"自启动起算、含 suspend"的计数族（③ 只是分辨率降到 1ms）。秒级展示与 AC1/AC3 的 ≤1s 判据不受影响；单测用 `GetTickCount64` 与解析结果交叉校验（误差 < 2s）。
 
+> **v4 重要更正**：以上"内核计数"只能回答"内核会话已经在线多久"，**不能回答"这次开机用了多久"**——开启快速启动时关机是休眠，计数跨关机连续累计。用户界面上的两个数字因此改为 §16 的事件日志打点；内核计数只保留为诊断日志与日志不可读时的兜底（并在界面标注）。下面的 AC1/AC3 判据已随之在 §9 重定义。
+
 WMI `LastBootUpTime` / `systeminfo` **仅作人工对账基准**，不作运行时依赖（延迟数百 ms～秒级，威胁 AC0/AC6 的 3 秒出数）。
 
 ### 2.2 硬性要求逐条实现方式
 
-1. **与任务管理器"正常运行时间"同口径（含睡眠）**：`QueryInterruptTime` 含 suspend 时间，语义即"含睡眠的正常运行时间"；启动后与权威来源对账（test-plan AC1/AC3）。
-2. **睡眠/唤醒连续不跳变**：单调计数睡眠期间照常推进，唤醒后从同一计数续算——无重置路径、无累加状态可丢；`WM_TIMER` 每秒刷新，唤醒后下一 tick 即连续值。
+1. **开机耗时来自系统日志（v4 修订，原为"与任务管理器同口径"）**：`Kernel-Boot 27`/`Kernel-General 12` → `Winlogon 7001`，见 §16；任务管理器"正常运行时间"是**内核会话龄**，快速启动后跨关机累计，不再作为本产品口径。
+2. **睡眠/唤醒连续不跳变**："已运行"以登录完成为起点，首次用墙钟差、之后用单调计数推进；睡眠期间计数照常推进，唤醒后从同一值续算——无重置路径、无累加状态可丢。
 3. **持久化原子性**：本期无持久化数据，标注 N/A（PRD）；P1 "累计开机时长"按 `写临时文件 + os.Rename`（NTFS 同卷原子替换）+ 校验和 + 断电自愈实现，方案在 §7 预留。
-4. **时区/夏令时不跳变**：全部计算基于绝对时刻与单调时长；`Boot = Now − Uptime` 与 `Now` 同时区，时区切换只改 `t.Format` 呈现。NTP 步进只影响 `Boot` 绝对展示（与系统权威来源同向漂移），运行时长完全不受影响。
+4. **时区/夏令时不跳变**：耗时为纯时长；"开机完成"按本地时区格式化，切换时区只改展示；NTP 步进不影响"已运行"（单调推进）。
 5. **数据源可降级（v3 新增）**：见 §2.1，实现位于 `internal/clock` 的 `candidate/choose` 选择器 + 平台候选表；失败文案聚合全部候选。
+6. **读不到日志宁可显示未知（v4）**：见 §16.4，兜底值必须显式标注，不得伪装成开机耗时。
 
 
 ### 2.3 精度分析（AC1/AC2）
@@ -80,9 +87,9 @@ flowchart TB
 
     subgraph 程序模块["进程内模块（Go 1.27，零第三方依赖，CGO_ENABLED=0）"]
         MAIN[cmd/boot-tool/main.go<br/>panic recover + 启动阶段日志]
-        APP[internal/app<br/>装配 View]
+        APP[internal/app<br/>装配 View / Toast]
         CLK[internal/clock<br/>Clock 接口 + 平台实现]
-        UP[internal/uptime<br/>口径核心 Boot = Now − Up]
+        UP[internal/bootlog<br/>开机耗时事实源 §16]
         GUI[internal/gui<br/>Win32 原生窗口 / 控制台模式]
         DIAG[internal/diag F6<br/>日志 %TEMP%\\boot-tool.log + MessageBox]
         LOC[internal/locale] & TFMT[internal/tfmt]
@@ -172,9 +179,9 @@ SetupIconFile=assets\app.ico                    ; 若无图标资源则省略该
 
 ```
 主窗口（双击 / --install-startup 之类动作另走动作分支）：
-  version-banner → single-instance → clock → locale → window-class → window → controls → timer → entering-message-loop
+  version-banner → single-instance → clock → boot-record → locale → window-class → window → controls → timer → entering-message-loop
 弹窗（--autostart，v0.3.0）：
-  version-banner → single-instance → clock → locale → toast-mode → toast-class → toast → toast-controls → toast-timer → entering-message-loop → toast-shown → toast-hidden
+  version-banner → single-instance → clock → boot-record → locale → toast-mode → toast-class → toast → toast-controls → toast-timer → entering-message-loop → toast-shown → toast-hidden
 自启注册动作（v0.3.0）：
   version-banner → autostart-install | autostart-uninstall
 ```
@@ -240,13 +247,24 @@ type Clock interface {
 func New() (Clock, error)          // 解析失败仅在全部候选缺失时发生（v3）
 func SourceName(c Clock) string    // 生效数据源，写启动日志（v3）
 
-// internal/uptime
-func Read(c clock.Clock) Snapshot // Snapshot{TakenAt, Up, Boot=Now-Up}，Boot 每次重算
-
 // internal/app
-func New(clk clock.Clock, lang locale.Lang) *App
-func (a *App) View() View    // 主窗口 View{Title, Up, Boot, Hint}
-func (a *App) ToastView() Toast // 弹窗 Toast{Header, Duration, Boot, Hint}（v3）
+func New(clk clock.Clock, lang locale.Lang, boot bootlog.Report) *App // v4：装配时钟、语言与本次启动记录
+func (a *App) View() View    // 主窗口 View{Title, Up, BootDur, BootDone, Hint}
+func (a *App) ToastView() Toast // 弹窗 Toast{Header, Duration, Done, Hint}
+
+// internal/bootlog —— 本次开机耗时/完成时刻（v4，docs/design.md §16）
+type Kind string // KindCold | KindHybrid | KindResume | KindUnknown
+type Record struct {
+    Start, Ready time.Time     // 启动打点、登录完成
+    Duration     time.Duration // Ready-Start = 本次开机耗时
+    Kind         Kind
+    Source       string
+    Approximate  bool          // true = 用内核计数兜底，界面需标注
+}
+type Cold struct{ Duration time.Duration; At time.Time }
+type Report struct{ Record; Cold *Cold } // Cold = 上次冷启动参照，可为 nil
+func Read() (Report, error)              // Windows：读 System 日志
+func FromUptime(now time.Time, uptime time.Duration) Report // 兜底
 
 // internal/gui
 type Mode int                 // ModeWindow | ModeToast（v3）
@@ -290,6 +308,9 @@ func Fatal(r any)                      // panic 兜底
 | AC9 开机自启（v3） | §15.1 `[Registry]` + `internal/autostart` | 本机 silent 安装后读 `HKCU\...\Run`；卸载后复查消失；`--install/--uninstall-startup` 各跑一次 |
 | AC10 右下角弹窗（v3） | §15.2 弹窗窗口与定时器 | 本机实测窗口矩形落在工作区右下角、文本内容、10s 自动消失、点击进主窗口、第二实例激活 |
 | AC11 数据源兼容（v3） | §2.1 分层降级 | 本机（`kernel32` 无该导出）实测 `source=kernelbase.dll!QueryInterruptTime`；单测覆盖候选选择顺序与全缺失报错 |
+| AC12 快速启动正确（v4） | §16 事件日志打点 + §15.2 弹窗 | 本机实测：混合启动显示 3 秒、已运行从 0 起，界面标注"（快速启动）" |
+| AC13 不用程序启动时刻（v4） | §16 只取 `Winlogon 7001` 作为完成时刻 | 代码审查 + 日志 `stage: boot-record ok (... ready=... source=eventlog:System)` |
+| AC14 日志不可读时诚实降级（v4） | §16.4 兜底与文案 | 单测覆盖 `FromUptime`：显示"未知"+ 风险提示，不编造数字 |
 
 ## 10. 决策记录（ADR）
 
@@ -303,6 +324,9 @@ func Fatal(r any)                      // panic 兜底
 | ADR-6 | Inno Setup 7 警告 `setup.exe` 会被应用兼容层 shim | 产物更名 **`boot-tool-setup.exe`** | 规避已知 DLL 劫持面；文档/CI/资产名同步 |
 | ADR-7 | 弹窗定时器可靠性 | 不用一次性 `SetTimer`，改**每 250ms 复查墙钟截止时间** | 单次 tick 丢失只延后消失，不会永久滞留；代价是 13 秒内约 52 次唤醒（可忽略） |
 | ADR-8 | 自启注册位置 | **HKCU Run 单值**（非计划任务、非启动文件夹） | 免管理员、任务管理器"启动应用"可见可控、卸载可清；不写机器级注册表 |
+| ADR-9 | 用户反馈"刚开机显示一个多小时"（2026-11-08） | **开机耗时改为系统事件日志打点**（`Kernel-Boot 27`/`Kernel-General 12` → `Winlogon 7001`） | 快速启动下也正确；`Diagnostics-Performance` 通道更权威但**需要管理员**（本机实测 `Get-WinEvent` 报"需要提升权限"），与"免管理员"硬约束冲突，故取 System 日志；错误时可见降级 |
+| ADR-10 | "已运行"语义 | 自**登录完成**起算，首次用墙钟差、此后用单调计数推进 | 与"这次开机"一致；不再等同任务管理器"正常运行时间"（后者在快速启动后等于内核会话龄，可跨关机累计） |
+| ADR-11 | 日志读不到怎么办 | 显示"未知"+ 明确风险提示，内核计数只做兜底且标注 `Approximate` | 宁可少一个数字，也不给一个看起来合理却错误的数字（避免重演"1 小时 53 分"） |
 
 | ADR-5 | PRD v2 与仓库 `docs/PRD.md` 不一致 | 架构师随本方案**同步提交 PRD v2**（PRD §3 同步提醒授权） | 仓库文档恢复为唯一基线，后续阶段不再依赖评论比对 |
 
@@ -400,7 +424,7 @@ func Fatal(r any)                      // panic 兜底
 | 外层样式 | `WS_POPUP` + 类样式 `CS_DROPSHADOW` | 无标题栏的卡片，带阴影 |
 | 扩展样式 | `WS_EX_TOPMOST｜WS_EX_TOOLWINDOW｜WS_EX_NOACTIVATE` | 置顶、不占任务栏/Alt-Tab、不抢焦点 |
 | 位置 | `SystemParametersInfo(SPI_GETWORKAREA)` 得到主屏**工作区**，`x = right − W − 16`、`y = bottom − H − 16`；越界向工作区左上钳制 | 贴着任务栏上方的右下角，多分辨率安全 |
-| 内容 | 标题（灰）"本次开机用时"、大号时长、开机时刻、"点击查看详情"（灰） | 一眼看到关键数字 |
+| 内容 | 标题（灰）"本次开机耗时"、大号时长、开机完成时刻、"点击查看详情"（灰） | 一眼看到关键数字 |
 | 尺寸 | 360 × 152（控件高度按字体行高留足；静态控件会垂直居中并裁切，不能压缩） | 中文 20 字符以内不换行 |
 
 **时序**：
@@ -449,4 +473,81 @@ stateDiagram-v2
 | 安装后弹窗 | 安装目录内 `boot-tool.exe --autostart` | ✅ 卡片正常出现并按时消失 |
 
 **发布**：tag **`v0.3.1`**（`v0.3.0` 在同一小时内因 `gui.Mode/Options` 未与 Windows 构建约束拆分、ubuntu CI 的 `GOOS=linux vet` 失败而由 `v0.3.1` 取代；两版 Windows 二进制行为一致，`release` 与 `ci` 现在均为绿）。Release 资产：`boot-tool.exe`、`boot-tool-debug.exe`、`boot-tool-setup.exe`、`SHA256SUMS.txt`；已实测下载 v0.3.1 的 `boot-tool.exe`：`sha256` 与 `SHA256SUMS.txt` 一致，`--autostart` 弹窗位置/内容/自动消失/退出码均符合 AC10。
+
+## 16. v0.4.0（HYPE-46 第二轮）：开机耗时改为系统日志打点
+
+### 16.1 现象与根因（本机实测）
+
+用户反馈"我刚开机，显示是耗时一个多小时"。现场取证（`System` 日志，同一台机器）：
+
+```
+10:21:55.818  Kernel-General 12  系统启动（BootType=0 冷启动）
+10:22:09.551  Winlogon 7001      用户登录完成
+12:11:41.985  Winlogon 7002      注销
+12:12:20.038  Kernel-Boot 27     BootType=1（快速启动/混合启动）
+12:12:23.161  Winlogon 7001      用户登录完成
+```
+
+- 12:12 那次"开机"实际只用了 **3.1 秒**（内核打点 → 登录完成）；
+- 但 v0.3.x 用内核计数 `QueryInterruptTime` 推导，而**快速启动的关机是休眠**，内核会话没有重建，计数从 10:21 一直累加 → 12:15 时读到 **1 小时 53 分**；
+- `Win32_OperatingSystem.LastBootUpTime` 同样是 10:21（它记录的也是内核会话起点），所以"换个 API"并不解决问题。
+
+结论：**"内核计数"回答的是"内核会话在线多久"，不是"这次开机用了多久"**。快速启动机器上两者可以差出几小时。
+
+### 16.2 数据源选型
+
+| 候选 | 结论 | 理由 |
+|---|---|---|
+| `Diagnostics-Performance/Operational` 事件 100（`BootTime`） | **不可用** | 这是 Windows 官方"启动耗时"字段，但**读取需要管理员权限**（本机 `Get-WinEvent` 直接报"需要提升权限"）；产品承诺免管理员（PRD §6） |
+| `Kernel-Boot 30`（`ExitBootServicesExit` 等阶段耗时） | **不用** | 该计数从上一次关机开始计时，关机到开机的间隔会被算进去：本机 10:21 冷启动给出 `159799ms`（≈2 分 40 秒）的假值，而 08:34 同机型是 `11255ms` |
+| **`System` 日志打点**（`Kernel-General 12` / `Kernel-Boot 27` → `Winlogon 7001`） | **采用** | 任何用户都可读；每次启动（含混合启动）都有记录；与官方 `BootTime` 语义一致（均不含 BIOS 自检） |
+| 程序自身启动时刻 / 内核计数反推 | **禁止** | 正是本次缺陷的来源（AC13） |
+| WMI `LastBootUpTime` | **禁止** | 快速启动后仍是上一次内核会话起点 |
+
+### 16.3 算法
+
+1. `EvtQuery(System, "*[System[(EventID=12 or EventID=27 or EventID=7001)]]", 反向)`，最多 200 条 —— 只取三类打点，避免整本日志渲染开销；实测 20ms 级。
+2. **启动打点** = 从新到旧遇到的第一个 `Kernel-General 12`（冷启动，带 `StartTime`）或 `Kernel-Boot 27`（带 `BootType`）；`BootType` 映射 `0=cold / 1=hybrid / 2=resume`。
+3. **登录完成** = 该打点之后**最早**的一条 `Winlogon 7001`（跳过 1 小时以外的记录，防止把后半夜的重新登录当成开机完成）。
+4. `开机耗时 = 登录完成 − 启动打点`；`开机完成时刻` 即该 `7001` 的时间（展示时转本地时区）。
+5. **上次冷启动参照**：继续向更旧方向找最近一次 `BootType=0/12` 打点 + 其后第一条登录，得到"上次冷启动 X 秒"，用于解释"这次 3 秒"。
+6. 秒级展示；`BootType≠0` 时界面加"（快速启动）"/"（休眠恢复）"。
+
+### 16.4 读不到日志时的降级（AC14）
+
+| 情况 | 行为 |
+|---|---|
+| `EvtQuery`/`EvtRender` 失败、无启动打点、无登录打点 | `bootlog.Read()` 返回错误 → `main` 记录 `stage: boot-record FAILED`，用 `bootlog.FromUptime` 兜底（`Approximate=true`） |
+| 兜底后的界面 | "本次开机耗时：未知"、"开机完成：未知"；小字改为"未读到系统启动日志，已运行按内核计时，快速启动后可能明显偏大" |
+| 为什么这样降级 | 兜底值在快速启动机器上可能差几小时；**显示"未知"比显示一个错误数字诚实**（ADR-11） |
+
+### 16.5 展示变化
+
+```
+主窗口                                          右下角卡片
+┌─ 开机小助手 ────────────────────────┐         ┌──────────────────────────────┐
+│ 已运行：11分29秒                      │         │ 本次开机耗时（快速启动）        │
+│ 本次开机耗时：3秒（快速启动）           │         │ 3秒                          │
+│ 开机完成：2026-11-08 12:12:23         │         │ 开机完成：2026-11-08 12:12:23  │
+│ 上次冷启动 13秒；耗时取自系统启动日志    │         │ 点击查看详情                   │
+│ （内核启动→登录完成），不含 BIOS 自检；  │         └──────────────────────────────┘
+│ 已运行含睡眠/休眠                      │
+└─────────────────────────────────────┘
+```
+
+- 主窗口由 3 行变 4 行（`已运行` / `本次开机耗时` / `开机完成` / 小字说明），窗口高度 200 → 248；
+- "已运行"首次读数 = 墙钟 − 登录完成，此后用单调计数推进（抗 NTP 校时、含睡眠）；
+- 弹窗标题携带启动类型，副行由"开机时间"改为"开机完成"。
+
+### 16.6 本机验证（Windows 11 10.0.26300 x64，2026-11-08 12:19）
+
+| 项 | 结果 |
+|---|---|
+| 真实日志读取 | ✅ `kind=hybrid start=04:12:20Z ready=04:12:23Z duration=3.123s`（UTC 显示，界面对齐本地 12:12:23） |
+| 冷启动参照 | ✅ `cold-reference duration=13.732s at=2026-11-08T02:21:55Z` |
+| 弹窗 | ✅ "本次开机耗时（快速启动） / 3秒 / 开机完成：2026-11-08 12:12:23" |
+| 主窗口 | ✅ "已运行：11分29秒 / 本次开机耗时：3秒（快速启动） / 开机完成：2026-11-08 12:12:23 / 上次冷启动 13秒；…" |
+| 单测 | ✅ 混合启动、冷启动、重新登录不缩短耗时、缺打点报错、休眠恢复、`FromUptime` 兜底、单调推进抗改表 |
+| 非管理员 | ✅ 全流程以普通用户权限读取 `System` 日志 |
+
 
