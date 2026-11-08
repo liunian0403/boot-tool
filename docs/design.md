@@ -286,3 +286,39 @@ func Fatal(r any)                      // panic 兜底
 | 免管理员（`{localappdata}`）安装满足用户对"安装包"的预期 | PRD §6 无管理员权限要求；若用户反馈需全机安装，改 `PrivilegesRequired=admin` 一行即可（回滚成本极低） |
 | AC6 资源指标实测可达成 | 无后台轮询、1Hz 单线程重算，预期远低于阈值；真机回填 |
 | 下一版本 v0.2.0 | ADR-3，Gia 复核可改 |
+
+## 14. `started_3` 落码记录（方案复核结论 + 实现说明）
+
+> 本节由 `started_3` 后端研发在动手前复核 §1–§13 后追加，作为实现与 QA 的对表依据；正文其余章节为唯一基准，冲突时以本节的"复核结论"为准。
+
+### 14.1 方案复核：通过，5 处澄清/修正
+
+| # | 位置 | 发现 | 处理 |
+|---|---|---|---|
+| 1 | §5.1 stage 契约 vs WIP `7846057` 的 `SetTimer` 非致命处理 | 两者冲突：WIP 只记日志继续跑 | **按 §5.1 执行**——无 1s 定时器则时长冻结为过期值 = 静默错误数据，`timer` stage 失败即失败可见退出 |
+| 2 | §4.1 `AppId` 示例 `...-HYPE44BOOT01` | 非法 GUID（含非 hex 字符） | 换成合法固定 GUID `{A7C4E9D2-51B8-4F3A-9C61-2D8E44B7F013}`；setup.exe 为首发，改此值无升级残留风险。锁定后勿再改 |
+| 3 | §4.1 内部路径不一致（`setup\boot-tool.iss` vs `packaging/boot-tool.iss`） | 两处写法并存 | 统一为 **`packaging/boot-tool.iss`**（§3、§6.2、§11 均用此路径），`Source` 用 `..\dist\boot-tool.exe` |
+| 4 | §6.2 版本注入 `-X main.version` | WIP 里 `version` 是 `const`，ldflags 无法覆盖 | 改为 `var version = "0.2.0"`；CI 从 tag 覆盖，tag 非 `vX.Y.Z` 直接失败（ADR-3） |
+| 5 | §5.2 "`QueryInterruptTime` 加载失败 → 退出" 无落点 | `clock.New()` 不返回错误，无法表达该失败 | 扩展为 `clock.New() (Clock, error)`（§8 未规定该签名），Windows 侧 `Find()` 失败即报错；Linux 侧永不失败 |
+
+另两处按 §13"验证方式"落实的实现细节：**Inno Setup 资产取官方 GitHub Release 直链**（`jrsoftware/issrc` tag `is-7_1_1`，带 sha256 `8a5a67…b3f0` 固定校验，比 `files.jrsoftware.org` 更可审计）；**`ci.yml` 增加 `installer`（windows-latest）job**，使 §13 第 1 条假设在本阶段 PR 上即可验证，而不是等到打 tag（§6.1 的 ubuntu job 保持不变，`installer` 为其并列补充）。
+
+### 14.2 WIP `7846057` 处置：**架构采纳、代码重做**（ADR-4 允许的两条路径之一）
+
+- 采纳：`internal/diag` 三分工（`Logf` / `Alert` / `Fatal`）、失败路径清单、诊断版构建思路、README 排障章节文案骨架。
+- 重做原因：WIP 的日志行是自由文本（`stage: class registered`、`stage: window shown...`），与 §5.1 固定 stage 序列对不上；README/test-plan/design 的文案基于 v0.1.1 与 v1 文档，与 v2 冲突。按 §11"冲突以本文档为准"，不 cherry-pick，按 §5 规范化后重写。
+- WIP 的 `docs/test-plan.md` B0、`docs/design.md` §3.1 一行**未并入**：B0/B8 属 `qa` 阶段产出（§11）；`docs/design.md` §3.1 已被 v2 重写，无需回填。
+
+### 14.3 交付物与验证状态
+
+| 交付 | 文件 | 本地验证 | 说明 |
+|---|---|---|---|
+| F6/AC0 失败可见性 | `internal/diag/`（diag.go / diag_windows.go / diag_proc.go + 2 个测试文件）、`cmd/boot-tool/main.go`、`internal/gui/*` | `go test ./...`、双平台 `go vet`、交叉编译 ✅ | stage 失败 = 日志 `stage: <name> FAILED: <err>` + 中英双语对话框（含日志路径）+ 退出码 1 |
+| 日志 512KB 轮转 | `internal/diag/diag.go` | 单测 `TestLogRotatesAtCap` ✅ | 超限滚动到 `boot-tool.log.1`（覆盖旧副本） |
+| diag 不 panic 单测 | `internal/diag/diag_test.go`、`diag_alert_test.go` | 6 个用例 ✅ | Windows 侧对话框用例以 `//go:build !windows` 隔离，避免阻塞 `release.yml` 的 Windows 测试；真机行为归 B0 |
+| 安装包 | `packaging/boot-tool.iss`（UTF-8 **带 BOM**） | 仅静态审查 | **本机为 Linux，无法运行 ISCC —— `setup.exe` 编译属 CI 验证项**（`ci.yml` installer job） |
+| CI | `.github/workflows/ci.yml` | YAML 静态审查 | ubuntu：vet/test/交叉编译；windows：Inno 静默安装 + ISCC 出包 |
+| 发布 | `.github/workflows/release.yml` | YAML 静态审查 | 单 `windows-latest` job：测试 → 双 exe → setup.exe → 三资产 SHA256 → `gh release create`；**首次跑通依赖 `started_5` 打 tag** |
+| 文档 | `README.md`（三资产表 + 「打不开？」排障 + 构建说明）、`docs/design.md` 本节、`.gitignore` | — | 版本文案统一为 **0.2.0**（ADR-3） |
+
+**QA 对表要点**：诊断版黑窗/日志中的 stage 行固定为 `stage: version-banner → clock → locale → window-class → window → controls → timer → entering-message-loop`，成功行形如 `stage: window ok`，失败行形如 `stage: controls FAILED: <err>`；B0 期望"逐行打印且无 `FAILED`"即以该序列为判据（注意连字符写法，以本节为准）。
