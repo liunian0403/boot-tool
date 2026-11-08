@@ -448,3 +448,5 @@ stateDiagram-v2
 | 安装包 | `ISCC /DMyAppVersion=0.3.0` → silent 安装/卸载 | ✅ 装到 `%LOCALAPPDATA%\Programs\BootTool`，开始菜单快捷方式、卸载项、Run 值齐备；卸载后全部清除 |
 | 安装后弹窗 | 安装目录内 `boot-tool.exe --autostart` | ✅ 卡片正常出现并按时消失 |
 
+**发布**：tag **`v0.3.1`**（`v0.3.0` 在同一小时内因 `gui.Mode/Options` 未与 Windows 构建约束拆分、ubuntu CI 的 `GOOS=linux vet` 失败而由 `v0.3.1` 取代；两版 Windows 二进制行为一致，`release` 与 `ci` 现在均为绿）。Release 资产：`boot-tool.exe`、`boot-tool-debug.exe`、`boot-tool-setup.exe`、`SHA256SUMS.txt`；已实测下载 v0.3.1 的 `boot-tool.exe`：`sha256` 与 `SHA256SUMS.txt` 一致，`--autostart` 弹窗位置/内容/自动消失/退出码均符合 AC10。
+
