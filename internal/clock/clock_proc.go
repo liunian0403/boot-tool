@@ -10,9 +10,10 @@ import (
 )
 
 // newClock returns the platform clock. Non-Windows builds exist for
-// development and CI smoke testing only (see docs/design.md §3.2).
-func newClock() Clock {
-	return procClock{}
+// development and CI smoke testing only (see docs/design.md §3.2); reading
+// /proc/uptime is best-effort, so construction itself cannot fail.
+func newClock() (Clock, error) {
+	return procClock{}, nil
 }
 
 // procClock reads /proc/uptime (dev convenience; delivery target is Windows).

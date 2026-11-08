@@ -13,7 +13,10 @@ import (
 // TestRealClockSanity: the dev-mode clock must return sane values on this
 // machine (boot instant in the past, uptime consistent with wall clock).
 func TestRealClockSanity(t *testing.T) {
-	c := clock.New()
+	c, err := clock.New()
+	if err != nil {
+		t.Fatalf("clock.New() failed: %v", err)
+	}
 	up := c.Uptime()
 	if up <= 0 {
 		t.Fatalf("uptime = %v, want > 0", up)

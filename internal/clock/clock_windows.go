@@ -3,6 +3,7 @@
 package clock
 
 import (
+	"fmt"
 	"syscall"
 	"time"
 	"unsafe"
@@ -13,9 +14,14 @@ var (
 	procQueryInterruptTime = modkernel32.NewProc("QueryInterruptTime")
 )
 
-// newClock returns the platform clock.
-func newClock() Clock {
-	return windowsClock{}
+// newClock returns the platform clock, or an error when QueryInterruptTime
+// cannot be resolved — the one data source the whole tool depends on
+// (docs/design.md §5.2).
+func newClock() (Clock, error) {
+	if err := procQueryInterruptTime.Find(); err != nil {
+		return nil, fmt.Errorf("QueryInterruptTime: %w", err)
+	}
+	return windowsClock{}, nil
 }
 
 // windowsClock reads the two sources documented in docs/design.md §2.1.

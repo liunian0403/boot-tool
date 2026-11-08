@@ -13,10 +13,15 @@ import (
 	"time"
 
 	"github.com/liunian0403/boot-tool/internal/app"
+	"github.com/liunian0403/boot-tool/internal/diag"
 )
 
-// Run prints a snapshot every second until interrupted.
-func Run(a *app.App) {
+// Run prints a snapshot every second until interrupted. Non-Windows builds
+// have no window, so only the applicable stages are logged; it never fails
+// and satisfies the same contract as the Windows implementation.
+func Run(a *app.App) error {
+	diag.Logf("non-Windows console mode: window stages not applicable")
+
 	printView := func() {
 		v := a.View()
 		fmt.Printf("[%s] %s | %s\n", v.Title, v.Boot, v.Up)
@@ -28,6 +33,7 @@ func Run(a *app.App) {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 
+	diag.Logf("stage: entering-message-loop")
 	printView()
 	for {
 		select {
@@ -35,7 +41,8 @@ func Run(a *app.App) {
 			printView()
 		case <-sig:
 			fmt.Println()
-			return
+			diag.Logf("stage: message-loop-ended")
+			return nil
 		}
 	}
 }

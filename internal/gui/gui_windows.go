@@ -6,10 +6,12 @@
 package gui
 
 import (
+	"fmt"
 	"syscall"
 	"unsafe"
 
 	"github.com/liunian0403/boot-tool/internal/app"
+	"github.com/liunian0403/boot-tool/internal/diag"
 )
 
 const (
@@ -32,10 +34,14 @@ const (
 	idcArrow     = 32512
 	idiApp       = 32512
 
-	swShow     = 5
-	fwNormal   = 400
-	fwBold     = 700
-	defaultSet = 1
+	swShowNormal = 1
+	fwNormal     = 400
+	fwBold       = 700
+	defaultSet   = 1
+
+	// errClassExists: RegisterClassExW rejects a duplicate class name, which
+	// is benign for this single-window process.
+	errClassExists = 1410
 
 	timerID = 1
 
@@ -48,24 +54,25 @@ var (
 	gdi32    = syscall.NewLazyDLL("gdi32.dll")
 	kernel32 = syscall.NewLazyDLL("kernel32.dll")
 
-	procRegisterClassExW   = user32.NewProc("RegisterClassExW")
-	procCreateWindowExW    = user32.NewProc("CreateWindowExW")
-	procDefWindowProcW     = user32.NewProc("DefWindowProcW")
-	procDestroyWindow      = user32.NewProc("DestroyWindow")
-	procPostQuitMessage    = user32.NewProc("PostQuitMessage")
-	procGetMessageW        = user32.NewProc("GetMessageW")
-	procTranslateMessage   = user32.NewProc("TranslateMessage")
-	procDispatchMessageW   = user32.NewProc("DispatchMessageW")
-	procSetTimer           = user32.NewProc("SetTimer")
-	procKillTimer          = user32.NewProc("KillTimer")
-	procSetWindowTextW     = user32.NewProc("SetWindowTextW")
-	procShowWindow         = user32.NewProc("ShowWindow")
-	procUpdateWindow       = user32.NewProc("UpdateWindow")
-	procLoadCursorW        = user32.NewProc("LoadCursorW")
-	procLoadIconW          = user32.NewProc("LoadIconW")
-	procSendMessageW       = user32.NewProc("SendMessageW")
-	procSetProcessDPIAware = user32.NewProc("SetProcessDPIAware")
-	procGetSysColorBrush   = user32.NewProc("GetSysColorBrush")
+	procRegisterClassExW    = user32.NewProc("RegisterClassExW")
+	procCreateWindowExW     = user32.NewProc("CreateWindowExW")
+	procDefWindowProcW      = user32.NewProc("DefWindowProcW")
+	procDestroyWindow       = user32.NewProc("DestroyWindow")
+	procPostQuitMessage     = user32.NewProc("PostQuitMessage")
+	procGetMessageW         = user32.NewProc("GetMessageW")
+	procTranslateMessage    = user32.NewProc("TranslateMessage")
+	procDispatchMessageW    = user32.NewProc("DispatchMessageW")
+	procSetTimer            = user32.NewProc("SetTimer")
+	procKillTimer           = user32.NewProc("KillTimer")
+	procSetWindowTextW      = user32.NewProc("SetWindowTextW")
+	procShowWindow          = user32.NewProc("ShowWindow")
+	procUpdateWindow        = user32.NewProc("UpdateWindow")
+	procLoadCursorW         = user32.NewProc("LoadCursorW")
+	procLoadIconW           = user32.NewProc("LoadIconW")
+	procSetForegroundWindow = user32.NewProc("SetForegroundWindow")
+	procSendMessageW        = user32.NewProc("SendMessageW")
+	procSetProcessDPIAware  = user32.NewProc("SetProcessDPIAware")
+	procGetSysColorBrush    = user32.NewProc("GetSysColorBrush")
 
 	procCreateFontW      = gdi32.NewProc("CreateFontW")
 	procSetTextColor     = gdi32.NewProc("SetTextColor")
@@ -108,8 +115,12 @@ var (
 	hInstance uintptr
 )
 
-// Run shows the window and blocks until the user closes it.
-func Run(a *app.App) {
+// Run shows the window and blocks until the user closes it. It follows the
+// fixed startup stage sequence of docs/design.md §5.1
+// (window-class → window → controls → timer → entering-message-loop) and
+// returns the first stage failure — already logged and shown to the user —
+// so main can exit non-zero instead of exiting silently (PRD F6/AC0).
+func Run(a *app.App) error {
 	view = a
 	v := a.View()
 
@@ -132,10 +143,15 @@ func Run(a *app.App) {
 		lpszClassName: className,
 		hIconSm:       icon,
 	}
-	procRegisterClassExW.Call(uintptr(unsafe.Pointer(&wc)))
+	if r, _, err := procRegisterClassExW.Call(uintptr(unsafe.Pointer(&wc))); r == 0 {
+		if errno, ok := err.(syscall.Errno); !ok || errno != errClassExists {
+			return diag.FailStage("window-class", fmt.Errorf("RegisterClassExW: %w", err))
+		}
+	}
+	diag.Logf("stage: window-class ok")
 
 	title := utf16(v.Title)
-	hwnd, _, _ := procCreateWindowExW.Call(
+	hwnd, _, err := procCreateWindowExW.Call(
 		0,
 		uintptr(unsafe.Pointer(className)),
 		uintptr(unsafe.Pointer(title)),
@@ -149,27 +165,52 @@ func Run(a *app.App) {
 		0,
 	)
 	if hwnd == 0 {
-		return
+		return diag.FailStage("window", fmt.Errorf("CreateWindowExW: %w", err))
 	}
+	diag.Logf("stage: window ok (hwnd=%d)", hwnd)
 
-	// Fonts: Segoe UI, the Windows 10/11 default UI face.
+	// Fonts: Segoe UI, the Windows 10/11 default UI face. A failed font is
+	// cosmetic — degrade to the system default and keep running.
 	fLarge := createFont(-30, fwBold)
 	fNormal := createFont(-21, fwNormal)
 	fSmall := createFont(-17, fwNormal)
+	if fLarge == 0 || fNormal == 0 || fSmall == 0 {
+		diag.Logf("fonts degraded to system default (large=%d normal=%d small=%d)", fLarge, fNormal, fSmall)
+	}
 
 	hUp = createStatic(hwnd, utf16(v.Up), 16, 18, 440, 48)
 	hBoot = createStatic(hwnd, utf16(v.Boot), 16, 74, 440, 28)
 	hHint = createStatic(hwnd, utf16(v.Hint), 16, 112, 440, 44)
+	if hUp == 0 || hBoot == 0 || hHint == 0 {
+		return diag.FailStage("controls", fmt.Errorf(
+			"CreateWindowExW(STATIC): hwnd up=%d boot=%d hint=%d, %w",
+			hUp, hBoot, hHint, syscall.GetLastError()))
+	}
+	diag.Logf("stage: controls ok")
 
-	sendWMSetFont(hUp, fLarge)
-	sendWMSetFont(hBoot, fNormal)
-	sendWMSetFont(hHint, fSmall)
+	if fLarge != 0 {
+		sendWMSetFont(hUp, fLarge)
+	}
+	if fNormal != 0 {
+		sendWMSetFont(hBoot, fNormal)
+	}
+	if fSmall != 0 {
+		sendWMSetFont(hHint, fSmall)
+	}
 
-	procShowWindow.Call(hwnd, swShow)
+	procShowWindow.Call(hwnd, swShowNormal)
+	procSetForegroundWindow.Call(hwnd) // never open behind other windows
 	procUpdateWindow.Call(hwnd)
-	procSetTimer.Call(hwnd, timerID, 1000, 0) // 1s refresh
 
-	// Message loop.
+	// Without the 1s timer the uptime would silently freeze at its first
+	// value — wrong data is worse than a visible failure, so this stage is
+	// fatal like every other one (docs/design.md §5.1).
+	if r, _, err := procSetTimer.Call(hwnd, timerID, 1000, 0); r == 0 {
+		return diag.FailStage("timer", fmt.Errorf("SetTimer: %w", err))
+	}
+	diag.Logf("stage: timer ok")
+
+	diag.Logf("stage: entering-message-loop")
 	var m winMsg
 	for {
 		ret, _, _ := procGetMessageW.Call(uintptr(unsafe.Pointer(&m)), 0, 0, 0)
@@ -179,6 +220,8 @@ func Run(a *app.App) {
 		procTranslateMessage.Call(uintptr(unsafe.Pointer(&m)))
 		procDispatchMessageW.Call(uintptr(unsafe.Pointer(&m)))
 	}
+	diag.Logf("stage: message-loop-ended")
+	return nil
 }
 
 // wndProc is the single window procedure for the process.
