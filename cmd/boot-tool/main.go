@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"runtime"
 	"strings"
@@ -18,7 +19,7 @@ import (
 // version is the release version; CI overwrites it from the v* tag with
 // -ldflags "-X main.version=..." so it never needs editing by hand
 // (docs/design.md §6.2, ADR-3).
-var version = "0.4.0"
+var version = "0.4.1"
 
 // startupAction is a maintenance command requested on the command line.
 type startupAction int
@@ -82,9 +83,15 @@ func run() int {
 		diag.Logf("stage: single-instance already running")
 		if gui.ActivateExisting() {
 			diag.Logf("stage: single-instance activated the running window")
-		} else {
-			diag.Logf("stage: single-instance running, no window to activate yet")
+			return 0
 		}
+		// Silent exit here is exactly what makes a double-click look like a
+		// hang: the instance exists but no window could be reached (still
+		// starting, or stuck). Say so instead.
+		diag.Logf("stage: single-instance running but no window to activate")
+		diag.Info("已有一个「开机小助手」正在运行，但没能找到它的窗口。\r\n" +
+			"它可能正在启动；若一直如此，可在任务管理器中结束 boot-tool.exe 后重试。\r\n\r\n" +
+			"An instance is already running but its window could not be reached.")
 		return 0
 	}
 	diag.Logf("stage: single-instance ok")
@@ -98,7 +105,7 @@ func run() int {
 
 	// 本次开机耗时来自系统启动日志；读不到才回退为内核计时并在界面标注
 	// （快速启动会让内核计数跨关机连续累计，docs/design.md §16）。
-	boot, bootErr := bootlog.Read()
+	boot, bootErr := readBootRecord(bootRecordBudget)
 	if bootErr != nil {
 		diag.Logf("stage: boot-record FAILED: %v (falling back to the kernel counter)", bootErr)
 		boot = bootlog.FromUptime(clk.Now(), clk.Uptime())
@@ -126,6 +133,39 @@ func run() int {
 	diag.Logf("boot-tool %s exiting normally", version)
 	return 0
 }
+
+// bootRecordBudget bounds the startup cost of reading the System event log. The
+// query normally takes tens of milliseconds, but right after sign-in the log
+// file may be cold and an antivirus scan can hold it, and the window must not be
+// delayed by it — a multi-second gap before any window appears is indistinguishable
+// from a hang. Past the budget the session falls back to the kernel counter and
+// says so in the UI.
+const bootRecordBudget = 1200 * time.Millisecond
+
+// readBootRecord runs the event-log read with a deadline.
+func readBootRecord(budget time.Duration) (bootlog.Report, error) {
+	type result struct {
+		rep bootlog.Report
+		err error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		rep, err := bootlog.Read()
+		ch <- result{rep: rep, err: err}
+	}()
+
+	timer := time.NewTimer(budget)
+	defer timer.Stop()
+	select {
+	case r := <-ch:
+		return r.rep, r.err
+	case <-timer.C:
+		return bootlog.Report{}, errBootRecordSlow
+	}
+}
+
+// errBootRecordSlow is reported when the System log could not be read in time.
+var errBootRecordSlow = errors.New("boot record read exceeded " + bootRecordBudget.String())
 
 // parseArgs reads the small command surface documented in `usage`. Unknown
 // arguments are logged and ignored: a launcher script passing an extra token

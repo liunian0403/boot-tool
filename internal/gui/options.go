@@ -28,6 +28,7 @@ const (
 	// defaultToastDelay lets Explorer finish painting the desktop and the taskbar
 	// before the popup appears, so it is not covered by other sign-in windows.
 	defaultToastDelay = 3 * time.Second
-	// defaultToastTimeout is long enough to read, short enough to stay out of the way.
-	defaultToastTimeout = 10 * time.Second
+	// defaultToastTimeout is long enough to read twice, short enough to stay out
+	// of the way. 30s is the user-requested value (2026-11-08).
+	defaultToastTimeout = 30 * time.Second
 )

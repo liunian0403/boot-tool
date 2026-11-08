@@ -35,9 +35,11 @@ func AcquireSingleInstance() bool {
 
 // ActivateExisting asks the running instance to bring its main window forward
 // (the popup is replaced by the main window). Right after sign-in the first
-// instance may not have created a window yet, so this retries briefly.
+// instance may not have created a window yet — it may still be reading the boot
+// log on a cold disk — so this waits up to 5s instead of giving up silently,
+// which is what makes a second double-click look like "nothing happens".
 func ActivateExisting() bool {
-	for attempt := 0; attempt < 10; attempt++ {
+	for attempt := 0; attempt < 50; attempt++ {
 		for _, class := range []string{mainClassName, toastClassName} {
 			hwnd, _, _ := procFindWindowW.Call(uintptr(unsafe.Pointer(utf16(class))), 0)
 			if hwnd == 0 {

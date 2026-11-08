@@ -8,6 +8,8 @@ package gui
 
 import (
 	"fmt"
+	"runtime"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unsafe"
@@ -68,6 +70,7 @@ const (
 	wmAppShow      = 0x8001 // WM_APP + 1: another launch asked us to show ourselves
 	wmAppToastShow = 0x8002 // WM_APP + 2: settle delay elapsed, show the popup
 	wmAppToastHide = 0x8003 // WM_APP + 3: the popup has been up long enough
+	wmAppWatch     = 0x8004 // WM_APP + 4: thread-message watchdog ping
 
 	// stnClicked is the static-control notification code carried in WM_COMMAND.
 	stnClicked = 0
@@ -129,13 +132,15 @@ var (
 	procSetWindowPos         = user32.NewProc("SetWindowPos")
 	procGetSystemMetrics     = user32.NewProc("GetSystemMetrics")
 	procFindWindowW          = user32.NewProc("FindWindowW")
+	procPostThreadMessage    = user32.NewProc("PostThreadMessageW")
 	procPostMessageW         = user32.NewProc("PostMessageW")
 	procCreateMutexW         = kernel32.NewProc("CreateMutexW")
 
-	procCreateFontW      = gdi32.NewProc("CreateFontW")
-	procSetTextColor     = gdi32.NewProc("SetTextColor")
-	procSetBkColor       = gdi32.NewProc("SetBkColor")
-	procGetModuleHandleW = kernel32.NewProc("GetModuleHandleW")
+	procCreateFontW        = gdi32.NewProc("CreateFontW")
+	procSetTextColor       = gdi32.NewProc("SetTextColor")
+	procSetBkColor         = gdi32.NewProc("SetBkColor")
+	procGetModuleHandleW   = kernel32.NewProc("GetModuleHandleW")
+	procGetCurrentThreadId = kernel32.NewProc("GetCurrentThreadId")
 )
 
 type wndClassEx struct {
@@ -193,6 +198,11 @@ var (
 	toastTimeout time.Duration
 	toastVisible bool
 
+	// Watchdog state: the UI thread stamps uiLastAck whenever it pumps; the
+	// watchdog goroutine reads it to detect stalls (see startUIWatchdog).
+	uiLastAck  int64
+	uiWatching int32
+
 	fontLarge      uintptr
 	fontNormal     uintptr
 	fontSmall      uintptr
@@ -204,6 +214,14 @@ var (
 // logged and shown to the user — so main can exit non-zero instead of exiting
 // silently (PRD F6/AC0).
 func Run(a *app.App, options Options) error {
+	// Win32 windows and their message queues belong to the OS thread that created
+	// them. Go may resume a goroutine on a different OS thread after any blocking
+	// syscall, and GetMessageW on the wrong thread waits forever on a queue that
+	// never receives anything: the windows stop answering (Windows reports
+	// AppHang) and the process never exits. Locking the goroutine to its thread
+	// for the whole GUI lifetime is mandatory, not an optimisation.
+	runtime.LockOSThread()
+
 	view = a
 	if options.ToastDelay <= 0 {
 		options.ToastDelay = defaultToastDelay
@@ -244,17 +262,62 @@ func Run(a *app.App, options Options) error {
 	}
 
 	diag.Logf("stage: entering-message-loop")
+	startUIWatchdog()
 	var m winMsg
 	for {
 		ret, _, _ := procGetMessageW.Call(uintptr(unsafe.Pointer(&m)), 0, 0, 0)
 		if int32(ret) <= 0 {
 			break
 		}
+		// Thread messages (no window) are only used by the watchdog: receiving one
+		// proves the UI thread is pumping.
+		if m.hwnd == 0 && m.message == wmAppWatch {
+			atomic.StoreInt64(&uiLastAck, time.Now().UnixNano())
+			continue
+		}
 		procTranslateMessage.Call(uintptr(unsafe.Pointer(&m)))
 		procDispatchMessageW.Call(uintptr(unsafe.Pointer(&m)))
 	}
+	atomic.StoreInt32(&uiWatching, 0)
 	diag.Logf("stage: message-loop-ended")
 	return nil
+}
+
+// startUIWatchdog records UI-thread stalls into the log.
+//
+// The window cannot tell the user that it stopped pumping, and a frozen app
+// leaves no evidence except a WER "AppHang" whose reports name neither the code
+// path nor the version. Posting a private thread message every 2s and checking
+// that it was consumed turns "它又卡死了" into a timestamped log line about how
+// long the thread was blocked.
+func startUIWatchdog() {
+	threadID, _, _ := procGetCurrentThreadId.Call()
+	atomic.StoreInt64(&uiLastAck, time.Now().UnixNano())
+	atomic.StoreInt32(&uiWatching, 1)
+
+	go func() {
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+		var lastReport time.Time
+		for range ticker.C {
+			if atomic.LoadInt32(&uiWatching) == 0 {
+				return
+			}
+			if r, _, _ := procPostThreadMessage.Call(threadID, wmAppWatch, 0, 0); r == 0 {
+				return // thread gone: nothing to watch
+			}
+			time.Sleep(1500 * time.Millisecond)
+			if atomic.LoadInt32(&uiWatching) == 0 {
+				return
+			}
+			stalled := time.Duration(time.Now().UnixNano() - atomic.LoadInt64(&uiLastAck))
+			if stalled > 5*time.Second && time.Since(lastReport) > 30*time.Second {
+				diag.Logf("watchdog: UI thread unresponsive for %s", stalled.Round(time.Second))
+				lastReport = time.Now()
+				atomic.StoreInt64(&uiLastAck, time.Now().UnixNano())
+			}
+		}
+	}()
 }
 
 // showMainWindow creates the main window on first use and shows it afterwards.
