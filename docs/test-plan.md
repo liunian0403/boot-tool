@@ -88,6 +88,29 @@
 - 关闭再重开工具：显示值一致。
 - 无控制台黑窗闪现（`-H=windowsgui` 验证）。
 
+## C. v0.3.0（HYPE-46）本机实测记录
+
+> 环境：Windows 11 专业版 10.0.26300 x64（AMD64），2026-11-08；Go 1.27.3；Inno Setup 7.1.1（与 CI 同版本同 sha256）。
+> 说明：本节是研发自测记录（可复现步骤 + 实际输出），QA 独立复验按 A/B 节执行。
+
+| 用例 | 对应 AC | 步骤 | 期望 | 实测 |
+|---|---|---|---|---|
+| C1 缺陷复现（修复前） | AC11 | 用 v0.2.0 二进制跑 `boot-tool-debug.exe` | 复现现场错误 | ✅ `stage: clock FAILED: QueryInterruptTime: Failed to find QueryInterruptTime procedure in kernel32.dll: The specified procedure could not be found.` |
+| C2 缺陷修复 | AC11 | 新二进制 `boot-tool-debug.exe --autostart` | 时钟阶段通过且写明数据源 | ✅ `stage: clock ok (source=kernelbase.dll!QueryInterruptTime)` |
+| C3 数据源单测 | AC11 | `go test ./internal/clock -v` | 选择顺序 + 全缺失报错 + 真机交叉校验 | ✅ `TestChooseUsesFirstResolvableSource` / `TestChooseReportsEveryMissingSource` / `TestWindowsClockResolves`（`GetTickCount64` 交叉校验 ±2s） |
+| C4 自启注册 | AC9 | `boot-tool.exe --install-startup` | 写 `HKCU\...\Run\BootTool` 并弹提示 | ✅ 值=`"<dist>\boot-tool.exe" --autostart`，信息框可见，进程退出码 0 |
+| C5 自启注销 | AC9 | `boot-tool.exe --uninstall-startup` | 删除该值 | ✅ 值不存在；重复执行仍成功（幂等） |
+| C6 安装包 | AC8 | `ISCC /DMyAppVersion=0.3.0` → `boot-tool-setup.exe /VERYSILENT` | 安装到用户目录 + 快捷方式 + 卸载项 + 自启值 | ✅ 四项齐备，退出码 0 |
+| C7 安装后自启命令 | AC9 | 读安装后的 Run 值 | 指向安装目录且带 `--autostart` | ✅ `"C:\Users\<用户>\AppData\Local\Programs\BootTool\boot-tool.exe" --autostart` |
+| C8 弹窗出现 | AC10 | 安装目录内 `boot-tool.exe --autostart` | ≤5s 出现卡片 | ✅ 3.0s 出现，窗口 `360×152`，矩形 `(1544,864)-(1904,1016)`（1920×1080、工作区底部 1032 → 右/底各 16px） |
+| C9 弹窗内容 | AC10 | 枚举子控件取文本 | 用时 + 开机时刻 + 提示 | ✅ `本次开机用时` / `1小时14分58秒` / `开机时间：…` / `点击查看详情` |
+| C10 自动消失 | AC10 | 计时观察 | 约 10s 消失且进程退出 | ✅ 总时长 13.0–13.2s（3s 延迟 + 10s 停留），`stage: toast-hidden (timeout)` 后正常退出 |
+| C11 点击进主窗口 | AC10 | 第二实例激活（模拟再次双击） | 卡片关闭、主窗口出现、无第二窗口 | ✅ 主窗口 `480×200` 出现，第二进程退出码 0，系统内仅 1 个 boot-tool 进程 |
+| C12 卸载清理 | AC8/AC9 | `unins000.exe /VERYSILENT` | 目录、快捷方式、卸载项、自启值全部清除 | ✅ 四项全部消失，退出码 0 |
+| C13 静态检查/单测 | — | `go vet ./...`、`go test ./...`（Windows 原生） | 全绿 | ✅ 8 个包全部通过 |
+
+**遗留（需真机/人工补充）**：AC1/AC2/AC3/AC5/AC6/AC7 仍需按 B 节在真实登录会话与睡眠场景下复验；AC10 的"不抢焦点"以窗口样式（`WS_EX_NOACTIVATE`）静态保证，建议人工确认一次（弹窗出现时键盘焦点仍在原窗口）。
+
 ## 回填与结论
 
 测试完成后把本文件的表格回填并随 PR/发布记录归档；任何 AC 不通过按缺陷流程处理，口径类问题（AC1/AC3）视为阻塞。

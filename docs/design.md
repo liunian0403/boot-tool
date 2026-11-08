@@ -1,18 +1,23 @@
-# 技术方案：Windows 开机小助手（boot-tool）· v2
+# 技术方案：Windows 开机小助手（boot-tool）· v3
 
-> 依据 `docs/PRD.md`（v2，HYPE-44 评论 `01a1b8fc`）。本文档是实现与测试的唯一技术基准。
-> v1 → v2：口径方案（§2）经上一轮验证**保持不变**；新增 §4（F5 双交付 setup.exe）、§5（F6/AC0 启动失败可见性）、§6（发布流水线重构）、§10（决策记录）、§11（分阶段实施计划）。
+> 依据 `docs/PRD.md`（v3，HYPE-46）。本文档是实现与测试的唯一技术基准。
+> v1 → v2：口径方案（§2）经上一轮验证**保持不变**；新增 §4（F5 双交付）、§5（F6/AC0 启动失败可见性）、§6（发布流水线重构）、§10（决策记录）、§11（分阶段实施计划）。
+> **v2 → v3（HYPE-46，2026-11-08）**：§2.1 时钟数据源改为**分层降级**（修复 kernel32 不再导出 `QueryInterruptTime` 导致的启动失败）；§5.1 stage 契约补 `single-instance` 与弹窗序列；新增 **§15**（F7 开机自启、F8 右下角弹窗、单实例激活、安装包产物更名）；§7/§8/§9/§10 同步。
 
 ## 0. 结论先行
 
 | # | 决策 | 结论 |
 |---|---|---|
-| 1 | 口径数据源 | `kernel32!QueryInterruptTime` 单调推导（不变，已冒烟对账） |
+| 1 | 口径数据源 | **分层降级**：`kernelbase!QueryInterruptTime` → `kernel32!QueryInterruptTime` → `kernel32!GetTickCount64`；生效数据源写日志（§2.1、§15.3） |
 | 2 | 安装包选型（PRD §7 开放问题 1） | **Inno Setup 7.1.1**，`PrivilegesRequired=lowest` 免管理员安装 |
 | 3 | 启动失败可见性（F6/AC0） | 采纳并规范化 Gia 参考实现 `7846057` 的 `internal/diag` 架构 |
-| 4 | 发布流水线 | `release.yml` 改为**单 `windows-latest` job**，产 exe + 诊断版 + setup.exe + SHA256SUMS；另加 PR 触发 CI |
-| 5 | 版本号 | 下一版 **v0.2.0**（新增交付物与失败可见性，semver 提 minor） |
-| 6 | 分支 | 全程 `feature/HYPE-44`；本方案与 PRD v2 同步作为该分支上的 docs 提交 |
+| 4 | 发布流水线 | `release.yml` 改为**单 `windows-latest` job**，产 exe + 诊断版 + `boot-tool-setup.exe` + SHA256SUMS；另加 PR 触发 CI |
+| 5 | 版本号 | 本版 **v0.3.0**（v0.2.0 已由 HYPE-44 交付；新增自启 + 弹窗 + 兼容层属功能增强，semver 提 minor） |
+| 6 | 分支 | `feature/HYPE-46`（HYPE-44 取消后本 issue 接手，基线含 v0.2.0 全部代码） |
+| 7 | 开机自启（F7） | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 单值 `BootTool`，命令带 `--autostart`；由安装器写入，程序也提供 `--install-startup/--uninstall-startup`（§15.1） |
+| 8 | 启动弹窗（F8） | 无第三方 UI 库的原生 Win32 卡片：置顶工具窗口 + 不抢焦点 + 主屏工作区右下角 + 3s 延迟/10s 停留 + 点击进主窗口（§15.2） |
+| 9 | 安装包产物名 | `boot-tool-setup.exe`（Inno Setup 7 对 `setup.exe` 有兼容层 shim 警告，安全面更优，ADR-6） |
+
 
 ## 1. 现状盘点（`feature/HYPE-44` @ `edd7a7f`）
 
@@ -32,24 +37,30 @@ docs/                        PRD、本设计、测试计划
 - **遗留**：①用户反馈"安装包打不开"根因未定位（SmartScreen / 下载损坏 / 静默失败三选一）；②交付形态只有单文件 exe，无安装包；③启动失败静默退出（GUI 子系统无任何提示）。
 - **WIP 输入**：Gia 参考实现 `7846057`（`internal/diag` 启动分阶段日志 + MessageBox + panic 兜底 + 诊断版构建），**未推送**，位于另一工作副本的本地 `feature/HYPE-44`。本方案 §5 采纳其架构并做两处规范化；代码落码归 `started_3`（cherry-pick 或重做，冲突以本设计为准）。
 
-## 2. 时钟口径设计（对应 PRD §2 四条硬性要求，v1 验证通过、不变）
+## 2. 时钟口径设计（对应 PRD §2 五条硬性要求）
 
 ### 2.1 数据源
 
 | 数据 | API | 说明 |
 |---|---|---|
-| 运行时长（含睡眠） | `kernel32!QueryInterruptTime` | 自系统启动的 100ns 单调计数，**含睡眠/休眠**，不受墙钟/时区/夏令时影响 |
+| 运行时长（含睡眠） | ① `kernelbase!QueryInterruptTime` ② `kernel32!QueryInterruptTime` ③ `kernel32!GetTickCount64` | 自系统启动的单调计数，**含睡眠/休眠**，不受墙钟/时区/夏令时影响。①/② 为 100ns，③ 为 1ms；启动时按序解析**第一个存在**的入口，生效者写日志 |
 | 墙钟 | `time.Now()` | 仅用于展示与推导开机时刻绝对值 |
 | 开机时刻（推导） | `Boot = Now − Uptime` | 每次刷新实时推导，不单独存储 |
 
+**为什么需要降级（HYPE-46 根因）**：`kernel32.dll` 在现代 Windows 上只是 API set 转发层，实际实现在 `kernelbase.dll`。Windows 11 **10.0.26300** 实测 `kernel32!QueryInterruptTime` 已不存在（`GetProcAddress` 返回 `ERROR_PROC_NOT_FOUND`），v0.2.0 的 `LazyProc.Find()` 因此失败并让程序停在 `clock` 阶段。修复方式不是换 API，而是**按存在性逐级解析**：只要同一口径（含睡眠的单调计时）任一口径可用，程序就必须能跑；三者全缺才允许可见失败，且错误文案要列出每个尝试过的入口。
+
+**降级不改变口径**：三者同为"自启动起算、含 suspend"的计数族（③ 只是分辨率降到 1ms）。秒级展示与 AC1/AC3 的 ≤1s 判据不受影响；单测用 `GetTickCount64` 与解析结果交叉校验（误差 < 2s）。
+
 WMI `LastBootUpTime` / `systeminfo` **仅作人工对账基准**，不作运行时依赖（延迟数百 ms～秒级，威胁 AC0/AC6 的 3 秒出数）。
 
-### 2.2 四条硬性要求逐条实现方式
+### 2.2 硬性要求逐条实现方式
 
 1. **与任务管理器"正常运行时间"同口径（含睡眠）**：`QueryInterruptTime` 含 suspend 时间，语义即"含睡眠的正常运行时间"；启动后与权威来源对账（test-plan AC1/AC3）。
 2. **睡眠/唤醒连续不跳变**：单调计数睡眠期间照常推进，唤醒后从同一计数续算——无重置路径、无累加状态可丢；`WM_TIMER` 每秒刷新，唤醒后下一 tick 即连续值。
-3. **持久化原子性**：本期无持久化数据，标注 N/A（PRD v2）；P1 "累计开机时长"按 `写临时文件 + os.Rename`（NTFS 同卷原子替换）+ 校验和 + 断电自愈实现，方案在 §7 预留。
+3. **持久化原子性**：本期无持久化数据，标注 N/A（PRD）；P1 "累计开机时长"按 `写临时文件 + os.Rename`（NTFS 同卷原子替换）+ 校验和 + 断电自愈实现，方案在 §7 预留。
 4. **时区/夏令时不跳变**：全部计算基于绝对时刻与单调时长；`Boot = Now − Uptime` 与 `Now` 同时区，时区切换只改 `t.Format` 呈现。NTP 步进只影响 `Boot` 绝对展示（与系统权威来源同向漂移），运行时长完全不受影响。
+5. **数据源可降级（v3 新增）**：见 §2.1，实现位于 `internal/clock` 的 `candidate/choose` 选择器 + 平台候选表；失败文案聚合全部候选。
+
 
 ### 2.3 精度分析（AC1/AC2）
 
@@ -63,7 +74,7 @@ WMI `LastBootUpTime` / `systeminfo` **仅作人工对账基准**，不作运行�
 flowchart TB
     subgraph 交付物
         EXE[boot-tool.exe 绿色单文件]
-        SETUP[setup.exe 安装包]
+        SETUP[boot-tool-setup.exe 安装包]
         DBG[boot-tool-debug.exe 诊断版]
     end
 
@@ -98,7 +109,7 @@ flowchart TB
 
 平台差异收敛在 `internal/clock`、`internal/gui`（build tag）与 `internal/diag`（build tag）三个包；口径逻辑（`uptime`/`tfmt`/`app`）平台无关，Linux 可直接单测。
 
-## 4. F5 双交付：setup.exe 安装包方案
+## 4. F5 双交付：安装包方案（产物 `boot-tool-setup.exe`）
 
 ### 4.1 选型：Inno Setup 7.1.1（主推荐）
 
@@ -142,8 +153,8 @@ SetupIconFile=assets\app.ico                    ; 若无图标资源则省略该
 
 ### 4.3 双交付一致性
 
-- `setup.exe` 内嵌的 `boot-tool.exe` 与 Release 中绿色版**同一构建产物**（CI 中先构建、后打包，不做二次编译）。
-- 两者共享同一 `AppVersion`（来自 tag），`SHA256SUMS.txt` 覆盖全部三个资产（exe / 诊断版 / setup.exe）。
+- `boot-tool-setup.exe` 内嵌的 `boot-tool.exe` 与 Release 中绿色版**同一构建产物**（CI 中先构建、后打包，不做二次编译）。
+- 两者共享同一 `AppVersion`（来自 tag），`SHA256SUMS.txt` 覆盖全部三个资产（exe / 诊断版 / boot-tool-setup.exe）。
 
 ## 5. F6/AC0 启动失败可见性（采纳 WIP `7846057`，两处规范化）
 
@@ -160,7 +171,12 @@ SetupIconFile=assets\app.ico                    ; 若无图标资源则省略该
 **规范化 2（相对 WIP）**：启动阶段命名固定为 `stage` 序列，诊断版逐行打印，形成可对表的契约：
 
 ```
-stage: version-banner → clock → locale → window-class → window → controls → timer → entering-message-loop
+主窗口（双击 / --install-startup 之类动作另走动作分支）：
+  version-banner → single-instance → clock → locale → window-class → window → controls → timer → entering-message-loop
+弹窗（--autostart，v0.3.0）：
+  version-banner → single-instance → clock → locale → toast-mode → toast-class → toast → toast-controls → toast-timer → entering-message-loop → toast-shown → toast-hidden
+自启注册动作（v0.3.0）：
+  version-banner → autostart-install | autostart-uninstall
 ```
 
 任一 stage 失败 ⇒ 写日志 `stage xxx FAILED: <err>` + `Alert` + 非零退出，**禁止无声退出**（AC0）。
@@ -172,7 +188,9 @@ stage: version-banner → clock → locale → window-class → window → contr
 | `main` 未捕获 panic | `defer recover` → `diag.Fatal`（对话框 + 日志 + 栈） |
 | `RegisterClassExW` / `CreateWindowExW` 失败 | `diag.Alert`（含 Win32 错误码）+ 日志 + 退出 |
 | 控件/字体创建失败 | 字体失败降级系统默认字体（继续运行）；控件失败 → Alert + 退出 |
-| `QueryInterruptTime` 加载失败 | Alert + 退出（Win8+ 理论不存在，防御） |
+| 时钟数据源（v3） | 按 §2.1 逐级降级；**三个候选全部缺失**才 Alert + 退出，错误文案列出每个候选与失败原因；成功时日志写明 `source=...` |
+| 弹窗创建/定时器失败（v3） | `toast-class` / `toast` / `toast-controls` / `toast-timer` 阶段失败 → Alert + 退出；弹窗定时器用"每 250ms 复查墙钟截止时间"实现，单次 tick 丢失只延后不会永久滞留 |
+| 自启注册失败（v3） | `--install-startup` / 安装器写入注册表失败 → `diag.FailStage("autostart-install")` 可见报错；卸载删除缺失值视为成功（幂等） |
 | 日志文件不可写 | 降级：仅 MessageBox（Alert 不依赖日志成功） |
 
 ### 5.3 诊断版 `boot-tool-debug.exe`
@@ -193,7 +211,7 @@ stage: version-banner → clock → locale → window-class → window → contr
 flowchart LR
     T["push tag v*"] --> S1["setup-go 1.27.x"] --> S2["go vet + go test（原生 Windows）"] --> S3["构建 boot-tool.exe<br/>(-s -w -H=windowsgui)"]
     S3 --> S4["构建 boot-tool-debug.exe<br/>(无 windowsgui)"]
-    S4 --> S5["安装 Inno Setup 7.1.1（静默）<br/>ISCC packaging/boot-tool.iss → setup.exe"]
+    S4 --> S5["安装 Inno Setup 7.1.1（静默）<br/>ISCC packaging/boot-tool.iss → boot-tool-setup.exe"]
     S5 --> S6["sha256sum → SHA256SUMS.txt<br/>（三资产）"]
     S6 --> S7["gh release create<br/>exe + debug + setup + SHA256SUMS"]
 ```
@@ -207,9 +225,9 @@ flowchart LR
 
 ## 7. 数据模型与存储
 
-- **本期（P0）**：**无任何持久化**——进程内存中只有每秒重算的 `Snapshot`，无文件、无注册表、无网络。这直接满足硬性要求 3 的"本期 N/A"。
+- **本期（P0）**：**无文件持久化**——进程内存中只有每秒重算的 `Snapshot`，无文件、无网络。
+- **注册表（v3 新增）**：仅一处业务写入——开机自启 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 的 `BootTool` 值（`REG_SZ`，值为 `"<exe 路径>" --autostart`），由安装器（勾选"开机时自动启动"时）或 `boot-tool.exe --install-startup` 写入，卸载或 `--uninstall-startup` 删除；无其它键、无机器级写入、不需管理员。
 - **P1 预留**（不实现，仅锁定方案防走样）：`%LOCALAPPDATA%\BootTool\sessions.json`，原子写 = 写 `sessions.json.tmp` → `os.Rename` → 覆盖前校验 JSON + 版本号字段；启动读取失败则备份为 `.corrupt` 后重建，断电自愈。
-- **注册表**：仅安装器写标准卸载键（`HKCU\...\Uninstall\{AppId}`，Inno Setup 自动管理），程序运行时不读写注册表。
 
 ## 8. 接口契约（模块边界）
 
@@ -219,21 +237,42 @@ type Clock interface {
     Now() time.Time        // 墙钟，仅展示/推导
     Uptime() time.Duration // 单调、含睡眠；绝不为负
 }
+func New() (Clock, error)          // 解析失败仅在全部候选缺失时发生（v3）
+func SourceName(c Clock) string    // 生效数据源，写启动日志（v3）
 
 // internal/uptime
 func Read(c clock.Clock) Snapshot // Snapshot{TakenAt, Up, Boot=Now-Up}，Boot 每次重算
 
 // internal/app
 func New(clk clock.Clock, lang locale.Lang) *App
-func (a *App) View() View // View{Title, Up, Boot, Hint} —— UI 唯一输入
+func (a *App) View() View    // 主窗口 View{Title, Up, Boot, Hint}
+func (a *App) ToastView() Toast // 弹窗 Toast{Header, Duration, Boot, Hint}（v3）
+
+// internal/gui
+type Mode int                 // ModeWindow | ModeToast（v3）
+type Options struct {         // v3
+    Mode Mode
+    ToastDelay, ToastTimeout time.Duration
+}
+func Run(a *app.App, opt Options) error
+func AcquireSingleInstance() bool // 命名互斥量；第二实例返回 false（v3）
+func ActivateExisting() bool      // FindWindow + WM_APP+1 激活已有窗口（v3）
+
+// internal/autostart —— 仅 HKCU Run 单值（v3）
+const ValueName = "BootTool"; const AutostartFlag = "--autostart"
+func Command(exePath string) string
+func Install(exePath string) error
+func Uninstall() error
+func InstalledCommand() (string, bool, error)
 
 // internal/diag —— 失败可见性唯一出口
 func Logf(format string, args ...any) // 永不失败、永不 panic
 func Alert(msg string)                 // 必达用户（MessageBox / stderr）
+func Info(msg string)                  // 动作类命令的结果提示（v3）
 func Fatal(r any)                      // panic 兜底
 ```
 
-**Release 资产契约**（QA/运维验收依据）：`boot-tool.exe`、`boot-tool-debug.exe`、`setup.exe`、`SHA256SUMS.txt`（覆盖前三者），全部挂同一 tag 的 GitHub Release。
+**Release 资产契约**（QA/运维验收依据）：`boot-tool.exe`、`boot-tool-debug.exe`、`boot-tool-setup.exe`、`SHA256SUMS.txt`（覆盖前三者），全部挂同一 tag 的 GitHub Release。
 
 ## 9. 验收标准 → 方案映射
 
@@ -247,7 +286,10 @@ func Fatal(r any)                      // panic 兜底
 | AC5 时区切换 | §2.2 条 4；`WM_TIMECHANGE` 立即刷新 | 单测 + 真机切时区 |
 | AC6 3 秒出数/资源 | §2.3 首帧快照；单线程 + 1Hz `WM_TIMER`，无轮询无网络 | 真机秒表 + 任务管理器采样回填 |
 | AC7 中英文 | `locale` + `tfmt`；安装器语言跟随系统 | 单测全用例 + 中/英系统各验一次 |
-| AC8 安装包 | §4.1 `.iss` 契约 | Win10/11 各走一遍安装→快捷方式→卸载 |
+| AC8 安装包 | §4.1 `.iss` 契约（产物 `boot-tool-setup.exe`） | Win10/11 各走一遍安装→快捷方式→卸载 |
+| AC9 开机自启（v3） | §15.1 `[Registry]` + `internal/autostart` | 本机 silent 安装后读 `HKCU\...\Run`；卸载后复查消失；`--install/--uninstall-startup` 各跑一次 |
+| AC10 右下角弹窗（v3） | §15.2 弹窗窗口与定时器 | 本机实测窗口矩形落在工作区右下角、文本内容、10s 自动消失、点击进主窗口、第二实例激活 |
+| AC11 数据源兼容（v3） | §2.1 分层降级 | 本机（`kernel32` 无该导出）实测 `source=kernelbase.dll!QueryInterruptTime`；单测覆盖候选选择顺序与全缺失报错 |
 
 ## 10. 决策记录（ADR）
 
@@ -255,8 +297,13 @@ func Fatal(r any)                      // panic 兜底
 |---|---|---|---|
 | ADR-1 | PRD §7 遗留问题 1：安装器选型，架构师提出、Gia 复核 | **Inno Setup 7.1.1**（备选 NSIS 3.x，否决 WiX/MSI/自写，理由见 §4.2） | CI 多一步静默安装；`.iss` 进仓评审；免管理员安装对齐 PRD §6 |
 | ADR-2 | 发布流水线要产 3 资产 + 校验 | **单 `windows-latest` job**，ubuntu 双 job 为备选（§6.2） | 简单可靠；消耗 windows 分钟数（可忽略）；回滚 = git 恢复原 workflow |
-| ADR-3 | 下一版本号 | **v0.2.0**（新增 setup.exe 交付物与 F6 失败可见性属功能增强；v0.1.0 已发布不可复用） | WIP 文案中 "0.1.1" 需随落码改为 0.2.0；PRD/README 同步 |
-| ADR-4 | WIP `7846057` 如何处置 | **采纳其 `internal/diag` 架构**，按 §5 两处规范化（512KB 轮转、stage 契约）；代码由 `started_3` cherry-pick 或重做，冲突以本文档为准 | 不重复造轮子；诊断能力成为 AC0 的实现基础 |
+| ADR-3 | 下一版本号 | v0.2.0 已发布；本版 **v0.3.0** | PRD/README 同步 |
+| ADR-4 | WIP `7846057` 如何处置 | **采纳其 `internal/diag` 架构**，按 §5 两处规范化（512KB 轮转、stage 契约） | 不重复造轮子；诊断能力成为 AC0 的实现基础 |
+| ADR-5 | HYPE-46 现场：`kernel32!QueryInterruptTime` 缺失导致无法启动 | **分层降级**（§2.1），不再单点强依赖；生效源写日志 | 任何单一导出缺失都不再使程序不可用；日志可定位实际口径来源 |
+| ADR-6 | Inno Setup 7 警告 `setup.exe` 会被应用兼容层 shim | 产物更名 **`boot-tool-setup.exe`** | 规避已知 DLL 劫持面；文档/CI/资产名同步 |
+| ADR-7 | 弹窗定时器可靠性 | 不用一次性 `SetTimer`，改**每 250ms 复查墙钟截止时间** | 单次 tick 丢失只延后消失，不会永久滞留；代价是 13 秒内约 52 次唤醒（可忽略） |
+| ADR-8 | 自启注册位置 | **HKCU Run 单值**（非计划任务、非启动文件夹） | 免管理员、任务管理器"启动应用"可见可控、卸载可清；不写机器级注册表 |
+
 | ADR-5 | PRD v2 与仓库 `docs/PRD.md` 不一致 | 架构师随本方案**同步提交 PRD v2**（PRD §3 同步提醒授权） | 仓库文档恢复为唯一基线，后续阶段不再依赖评论比对 |
 
 ## 11. 分阶段实施计划（不跳步，角色即工作流阶段）
@@ -324,3 +371,80 @@ func Fatal(r any)                      // panic 兜底
 | 文档 | `README.md`（三资产表 + 「打不开？」排障 + 构建说明）、`docs/design.md` 本节、`.gitignore` | — | 版本文案统一为 **0.2.0**（ADR-3） |
 
 **QA 对表要点**：诊断版黑窗/日志中的 stage 行固定为 `stage: version-banner → clock → locale → window-class → window → controls → timer → entering-message-loop`，成功行形如 `stage: window ok`，失败行形如 `stage: controls FAILED: <err>`；B0 期望"逐行打印且无 `FAILED`"即以该序列为判据（注意连字符写法，以本节为准）。
+
+## 15. v0.3.0（HYPE-46）：数据源兼容 + 开机自启 + 右下角弹窗
+
+> 本节为 v3 新增，落地 PRD F7/F8/F9 与 AC9–AC11。其余章节仍为基准；与本节冲突处以本节为准。
+
+### 15.1 F7 开机自启
+
+| 项 | 设计 |
+|---|---|
+| 位置 | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`，值名固定 `BootTool`（`REG_SZ`） |
+| 值数据 | `"<exe 绝对路径>" --autostart`（路径含空格，必须带引号；`internal/autostart.Command`） |
+| 写入方 | ① 安装器 `[Registry]`，绑定 `startup` 任务（默认勾选，`Flags: checkedonce`）；② 绿色版手动 `boot-tool.exe --install-startup` |
+| 删除方 | 安装器卸载（`Flags: uninsdeletevalue`）；`boot-tool.exe --uninstall-startup`（缺失值视为成功，幂等） |
+| 权限 | 仅当前用户，免管理员；任务管理器"启动应用"里可见、可禁用、可删除 |
+| 失败可见 | 写入失败 → `stage: autostart-install FAILED` + 对话框（含 Win32 错误码）；成功 → 信息框回显完整命令 |
+
+为什么不用计划任务/启动文件夹：计划任务需管理员或额外 COM 调用、对普通用户不可见；启动文件夹是"另一个快捷方式"要额外维护。Run 值是同一件事里最标准、最好排查的形态（ADR-8）。
+
+### 15.2 F8 右下角弹窗
+
+**模式判定**：`--autostart` → `gui.ModeToast`；无参数 → `gui.ModeWindow`。自动启动只弹卡片（不弹主窗口），手动启动只开主窗口（不弹卡片）——两条路径互不干扰。
+
+**窗口形态**（`internal/gui/toast_windows.go`）：
+
+| 属性 | 取值 | 目的 |
+|---|---|---|
+| 外层样式 | `WS_POPUP` + 类样式 `CS_DROPSHADOW` | 无标题栏的卡片，带阴影 |
+| 扩展样式 | `WS_EX_TOPMOST｜WS_EX_TOOLWINDOW｜WS_EX_NOACTIVATE` | 置顶、不占任务栏/Alt-Tab、不抢焦点 |
+| 位置 | `SystemParametersInfo(SPI_GETWORKAREA)` 得到主屏**工作区**，`x = right − W − 16`、`y = bottom − H − 16`；越界向工作区左上钳制 | 贴着任务栏上方的右下角，多分辨率安全 |
+| 内容 | 标题（灰）"本次开机用时"、大号时长、开机时刻、"点击查看详情"（灰） | 一眼看到关键数字 |
+| 尺寸 | 360 × 152（控件高度按字体行高留足；静态控件会垂直居中并裁切，不能压缩） | 中文 20 字符以内不换行 |
+
+**时序**：
+
+```mermaid
+stateDiagram-v2
+    [*] --> 隐藏等待: 创建窗口 + SetTimer(250ms)
+    隐藏等待 --> 已显示: elapsed >= ToastDelay(3s)，重读 ToastView 并 ShowWindow(SW_SHOWNOACTIVATE)
+    已显示 --> 已关闭: elapsed >= ToastTimeout(10s) → 销毁窗口 → 无主窗口则退出进程
+    已显示 --> 主窗口: 点击卡片(WM_COMMAND STN_CLICKED / WM_LBUTTONUP) → 建主窗口 → 销毁卡片
+    已显示 --> 主窗口: 用户再次双击程序(单实例激活，WM_APP+1)
+```
+
+- **为什么 3 秒延迟**：登录瞬间桌面、任务栏、开机启动项都在抢屏幕，立刻弹窗会被遮挡或与其它通知打架；3 秒后桌面基本就绪，且此时读到的是"桌面可用时已过的开机时长"，正是用户想看的数。
+- **为什么用 250ms 复查而不是一次性定时器**：`WM_TIMER` 是低优先级消息，繁忙/省电场景可能被合并或延后。一次性定时器一旦丢失，弹窗就永久留在屏幕上；复查式实现最坏只是晚一点消失（ADR-7）。
+- **点击进主窗口**：`showMainWindow()` 先建主窗口，成功后再销毁卡片（`wmDestroy` 只在"既无主窗口又无卡片"时才 `PostQuitMessage`，避免先退出进程）。
+
+**单实例**（`internal/gui/instance_windows.go`）：命名互斥量 `BootToolSingleInstance`（会话级），第二实例不建窗口，`FindWindow("BootToolMainWindow" | "BootToolToastWindow")` + `PostMessage(WM_APP+1)` 让已运行实例显示主窗口并收掉卡片；找不到窗口时短暂重试 10×100ms（覆盖登录瞬间的创建竞态）。
+
+### 15.3 F9 数据源兼容层
+
+`internal/clock/source.go` 的 `candidate{name, find}` + `choose()` 是平台无关的选择器（可在任意平台单测），Windows 侧据此构造三条候选：
+
+| 顺序 | 候选 | 分辨率 | 备注 |
+|---|---|---|---|
+| 1 | `kernelbase.dll!QueryInterruptTime` | 100ns | 真实实现；Windows 10/11 均有 |
+| 2 | `kernel32.dll!QueryInterruptTime` | 100ns | 旧版转发层；26300 起可能缺失 |
+| 3 | `kernel32.dll!GetTickCount64` | 1ms | Vista 起必有，同计数族，最后的兜底 |
+
+- 生效者以 `clock.SourceName()` 写入 `stage: clock ok (source=...)`，诊断版黑窗与日志都能一眼看到实际口径来源。
+- 全部缺失才返回错误；错误串聚合每个候选名称与原因，对话框直接给出可转述的信息。
+- 单测：选择顺序（命中即停）、全缺失时错误包含每个候选、Windows 真机用 `GetTickCount64` 交叉校验 ±2s。
+
+### 15.4 本机验证记录（Windows 11 10.0.26300 x64，2026-11-08）
+
+| 项 | 命令/手段 | 结果 |
+|---|---|---|
+| 原始缺陷复现 | 旧二进制 `boot-tool-debug.exe` | ✅ 复现 `stage: clock FAILED: QueryInterruptTime: Failed to find ... in kernel32.dll`（与用户现场一致） |
+| 修复后启动 | 新二进制 `--autostart` | ✅ `stage: clock ok (source=kernelbase.dll!QueryInterruptTime)` |
+| 弹窗位置 | `GetWindowRect` | ✅ `(1544,864)-(1904,1016)`，360×152；1920×1080 屏、工作区底部 1032 → 距右/底各 16px |
+| 弹窗内容 | `EnumChildWindows` + `GetWindowTextW` | ✅ 本次开机用时 / 时长 / 开机时间 / 点击查看详情 |
+| 自动消失 | 计时观察 | ✅ 3s 出现、10s 消失、进程退出（13s 总时长） |
+| 点击进主窗口 | 第二实例激活（`WM_APP+1`） | ✅ 卡片关闭、主窗口出现、第二进程退出码 0、进程数仍为 1 |
+| 自启注册 | `--install-startup` / `--uninstall-startup` | ✅ 写入/删除 `HKCU\...\Run\BootTool`，信息框可见 |
+| 安装包 | `ISCC /DMyAppVersion=0.3.0` → silent 安装/卸载 | ✅ 装到 `%LOCALAPPDATA%\Programs\BootTool`，开始菜单快捷方式、卸载项、Run 值齐备；卸载后全部清除 |
+| 安装后弹窗 | 安装目录内 `boot-tool.exe --autostart` | ✅ 卡片正常出现并按时消失 |
+

@@ -2,8 +2,9 @@
 
 适用于 Windows 的开机时间统计小工具：**一眼看清"什么时候开的机、开了多久"**，数值与 Windows 任务管理器"正常运行时间"同口径（含睡眠/休眠），精确到秒、永不漂移。
 
+- **装好就不用管**：安装时默认勾选开机自启，每次登录 Windows 会在**右下角自动弹出卡片**，告诉你这次开机用了多久；约 10 秒自动消失，点一下就能看详情
 - 单文件 exe 双击即用：无控制台黑窗、无网络请求、不上传任何数据
-- 也提供 `setup.exe` 安装包（开始菜单快捷方式 + 控制面板卸载项，**免管理员**）
+- 也提供 `boot-tool-setup.exe` 安装包（开始菜单快捷方式 + 控制面板卸载项，**免管理员**）
 - 零第三方依赖（Go 标准库 + 原生 Win32 API），内存占用极低
 - 中英文自动切换（跟随 Windows 显示语言）
 - 启动失败**一定可见**：错误对话框 + `%TEMP%\boot-tool.log`，另有 `boot-tool-debug.exe` 诊断版
@@ -16,6 +17,9 @@
 | 已开机时长 | 实时刷新（每秒），格式如 `3天4小时5分6秒` / `3d 4h 5m 6s` |
 | 口径对齐 | 含睡眠/休眠时间，与任务管理器"正常运行时间"一致 |
 | 睡眠恢复 | 睡眠/休眠唤醒后数值连续，不重置不跳变 |
+| 开机自启 | 安装时默认开启（可在安装向导取消），写入 `HKCU\...\Run`，任务管理器"启动应用"可见可关；卸载自动清除 |
+| 启动弹窗 | 自启启动时在右下角显示本次开机用时，约 10 秒自动消失，点击进入主窗口；不抢焦点、不占任务栏 |
+| 单实例 | 重复双击不会开出第二个窗口，而是激活已在运行的窗口 |
 
 窗口底部有一行小字口径提示；时区切换、夏令时、NTP 校时都不会引起已开机时长跳变。
 
@@ -25,20 +29,35 @@
 
 | 资产 | 用途 |
 |---|---|
-| `setup.exe` | **安装包**：双击走完安装向导，开始菜单出现「开机小助手」，控制面板可卸载；装到 `%LOCALAPPDATA%\Programs\BootTool`，**不需要管理员权限** |
+| `boot-tool-setup.exe` | **安装包**：双击走完安装向导（默认勾选"开机时自动启动"），开始菜单出现「开机小助手」，控制面板可卸载；装到 `%LOCALAPPDATA%\Programs\BootTool`，**不需要管理员权限** |
 | `boot-tool.exe` | 绿色单文件，解压/下载后双击即用，无需安装 |
 | `boot-tool-debug.exe` | 控制台诊断版：逐步打印启动过程，打不开时用它定位（见下方「打不开？」） |
 | `SHA256SUMS.txt` | 上述三个文件的 SHA256 校验值 |
 
-界面示意：
+### 日常使用（装好之后）
+
+装完就不用管了：每次登录 Windows，约 3 秒后**右下角弹出卡片**，显示这次开机用了多久；约 10 秒自动消失。想细看就点卡片，或从开始菜单打开主窗口。
 
 ```
-┌─ 开机小助手 ─────────────────────────────┐
-│  已开机：3天4小时5分6秒                    │
-│  开机时间：2026-11-05 13:10:26            │
-│  含睡眠/休眠时间，与 Windows 任务管理器口径一致 │
-└──────────────────────────────────────────┘
+主窗口                                       右下角卡片
+┌─ 开机小助手 ─────────────────────┐        ┌──────────────────────────┐
+│  已开机：3天4小时5分6秒             │        │ 本次开机用时              │
+│  开机时间：2026-11-05 13:10:26      │        │ 1小时14分58秒             │
+│  含睡眠/休眠时间，与任务管理器口径一致 │        │ 开机时间：2026-11-08 10:21:55│
+└────────────────────────────────────┘        │ 点击查看详情              │
+                                              └──────────────────────────┘
 ```
+
+绿色版（不装安装包）也可以自己注册开机自启：
+
+```powershell
+boot-tool.exe --install-startup     # 设置开机自动启动（写 HKCU\...\Run，免管理员）
+boot-tool.exe --uninstall-startup   # 取消开机自动启动
+boot-tool.exe --autostart           # 只弹右下角卡片（自启用，一般不用手动敲）
+boot-tool.exe --help                # 命令行说明
+```
+
+任务管理器 →「启动应用」里也能看到并禁用 `BootTool` 这一项；卸载安装包会自动清掉它。
 
 ## 自行构建
 
@@ -54,15 +73,15 @@ GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
   go build -ldflags "-s -w" -o dist/boot-tool-debug.exe ./cmd/boot-tool
 ```
 
-产物为单个 `boot-tool.exe`（约 1.8 MB），拷到任意 Windows 10 1809+ / Windows 11 x64 机器即可运行，无需运行时、无需管理员权限。
+产物为单个 `boot-tool.exe`（约 1.9 MB），拷到任意 Windows 10 1809+ / Windows 11 x64 机器即可运行，无需运行时、无需管理员权限。
 
 **安装包**（需 [Inno Setup 7.x](https://jrsoftware.org/isdl.php)，Windows 上执行，先构建 `dist\boot-tool.exe`）：
 
 ```powershell
-ISCC.exe /DMyAppVersion=0.2.0 packaging\boot-tool.iss   # 产物 dist\setup.exe
+ISCC.exe /DMyAppVersion=0.3.0 packaging\boot-tool.iss   # 产物 dist\boot-tool-setup.exe
 ```
 
-发布由 CI 完成：打 `vX.Y.Z` 标签即触发 `release.yml`，产出 `boot-tool.exe` + `boot-tool-debug.exe` + `setup.exe` + `SHA256SUMS.txt` 并挂到 GitHub Release；`ci.yml` 在 PR / `main` 推送上跑 vet、测试、交叉编译与安装包编译。
+发布由 CI 完成：打 `vX.Y.Z` 标签即触发 `release.yml`，产出 `boot-tool.exe` + `boot-tool-debug.exe` + `boot-tool-setup.exe` + `SHA256SUMS.txt` 并挂到 GitHub Release；`ci.yml` 在 PR / `main` 推送上跑 vet、测试、交叉编译与安装包编译。
 
 ## 打不开？（故障排查）
 
@@ -73,29 +92,33 @@ ISCC.exe /DMyAppVersion=0.2.0 packaging\boot-tool.iss   # 产物 dist\setup.exe
 3. **确认下载完整**（GitHub 在部分地区下载可能中断）：命令行执行
    `certutil -hashfile boot-tool.exe SHA256`，与 Release 页 `SHA256SUMS.txt` 对比；不一致请重新下载。
 4. **仍打不开**：运行 **`boot-tool-debug.exe`**（控制台诊断版），它会把启动过程逐步打印出来（`stage: ...` 逐行，最后一行即卡点）；把黑窗内容和 `%TEMP%\boot-tool.log` 一起反馈，即可定位。
-5. 被杀毒软件隔离的话，请在 Windows 安全中心 → 病毒和威胁防护 → 保护历史记录中恢复/放行（程序无网络、无持久化，可放心放行）。
-6. **安装包装不上**：`setup.exe` 为按用户安装（免管理员），装到 `%LOCALAPPDATA%\Programs\BootTool`；若企业策略拦截写入用户目录，会弹出可见错误对话框，按提示反馈即可。
+5. **卡在 `stage: clock FAILED`**（v0.3.0 已修复）：日志出现 `stage: clock ok (source=...)` 说明时钟源已选中；若仍失败，说明该机器的 `kernelbase` / `kernel32` / `GetTickCount64` 三个入口都不可用，把日志发来即可。
+6. 被杀毒软件隔离的话，请在 Windows 安全中心 → 病毒和威胁防护 → 保护历史记录中恢复/放行（程序无网络、无持久化，可放心放行）。
+7. **安装包装不上**：`boot-tool-setup.exe` 为按用户安装（免管理员），装到 `%LOCALAPPDATA%\Programs\BootTool`；若企业策略拦截写入用户目录，会弹出可见错误对话框，按提示反馈即可。
+8. **开机没有弹窗**：先确认任务管理器 →「启动应用」里的 `BootTool` 是"已启用"；再手动跑一次安装目录里的 `boot-tool.exe --autostart`，若卡片能出来说明自启项被禁用或被杀软拦截；用 `--install-startup` 可重新注册。
 
 ## 开发与测试
 
 ```bash
-go test ./...                 # 单元测试（任意平台）
+go test ./...                 # 单元测试（任意平台；Windows 上会额外跑真机时钟源用例）
 go vet ./...                  # 静态检查
 GOOS=windows go vet ./...     # Windows 侧静态检查
 go run ./cmd/boot-tool        # 非 Windows：控制台冒烟模式（每秒打印快照）
+go run ./cmd/boot-tool --autostart   # 打印一次卡片内容（模拟自启）
 ```
 
 代码结构：
 
 ```
-cmd/boot-tool/        入口（启动 stage 序列 + panic 兜底）
-internal/clock/       时钟抽象（Windows: QueryInterruptTime；Linux: /proc/uptime；测试: Fake）
+cmd/boot-tool/        入口（flag 解析 + 启动 stage 序列 + panic 兜底）
+internal/clock/       时钟抽象（Windows: 分层解析 kernelbase/kernel32/GetTickCount64；Linux: /proc/uptime；测试: Fake）
 internal/uptime/      核心口径：开机时刻 = 现在 − 运行时长（含睡眠）
 internal/locale/      语言检测（GetUserDefaultUILanguage / LANG）
 internal/tfmt/        时长与时间格式化（中/英）
-internal/app/         展示装配
-internal/gui/         Win32 原生窗口（裸 syscall，无第三方 GUI 库）
-internal/diag/        启动诊断：日志 %TEMP%\boot-tool.log + 错误对话框（失败可见）
+internal/app/         展示装配（主窗口 View + 弹窗 ToastView）
+internal/gui/         Win32 原生窗口与右下角弹窗（裸 syscall，无第三方 GUI 库）+ 单实例激活
+internal/autostart/   开机自启注册（HKCU\...\Run 单值，免管理员）
+internal/diag/        启动诊断：日志 %TEMP%\boot-tool.log + 错误/信息对话框（失败可见）
 packaging/            Inno Setup 安装脚本 boot-tool.iss
 .github/workflows/    ci.yml（PR 门禁）+ release.yml（打 tag 发三资产）
 docs/                 PRD、技术方案、测试计划
@@ -103,19 +126,20 @@ docs/                 PRD、技术方案、测试计划
 
 ## 口径说明（为什么数字对得上）
 
-- **已开机时长**来自 `QueryInterruptTime`：内核单调计数、**包含睡眠/休眠**，不受墙钟调整/时区/夏令时影响 —— 与任务管理器"正常运行时间"同语义，7 天不漂移。
+- **已开机时长**来自系统单调计时：优先 `kernelbase!QueryInterruptTime`（100ns），不可用时退回 `kernel32!QueryInterruptTime`，再不可用退到 `GetTickCount64`（1ms）。三者同为"自启动起算、**包含睡眠/休眠**"的计数族，不受墙钟调整/时区/夏令时影响 —— 与任务管理器"正常运行时间"同语义，7 天不漂移。
+- **实际用的是哪个**：启动日志里 `stage: clock ok (source=...)` 会写明；这条是排查口径问题的第一现场。
 - **开机时间** = 当前墙钟 − 已开机时长，每次刷新实时推导，不落盘、不依赖 WMI。
 - 详细设计与取舍见 [`docs/design.md`](docs/design.md)。
 
 ## 文档
 
-- [`docs/PRD.md`](docs/PRD.md) — 需求与验收标准（AC0–AC8）
+- [`docs/PRD.md`](docs/PRD.md) — 需求与验收标准（AC0–AC11）
 - [`docs/design.md`](docs/design.md) — 技术方案（含 PRD 开放问题决策）
 - [`docs/test-plan.md`](docs/test-plan.md) — 测试计划与验收回填表
 
 ## 路线图
 
-- **P1**：纯运行时长（剔除睡眠）、累计开机时长 + 历史会话、托盘常驻 + 开机自启
+- **P1**：纯运行时长（剔除睡眠）、累计开机时长 + 历史会话、托盘常驻
 - **P2**：CSV 导出、超时提醒、更完整多语言
 
 ## License
